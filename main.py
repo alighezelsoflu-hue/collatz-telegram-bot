@@ -28,17 +28,18 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 SECRET_PATH = os.getenv("SECRET_PATH", "telegram-webhook")
 
-# football-data.org token.
-# Add this in Render:
-# FOOTBALL_DATA_TOKEN = your_token_here
+# football-data.org
 FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN") or os.getenv("FOOTBALL_API_KEY")
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
-
 WORLD_CUP_COMPETITION = os.getenv("WORLD_CUP_COMPETITION", "WC")
 WORLD_CUP_SEASON = int(os.getenv("WORLD_CUP_SEASON", "2026"))
 
 EU_TIMEZONE = os.getenv("WORLD_CUP_EU_TIMEZONE", "Europe/Berlin")
 IRAN_TIMEZONE = os.getenv("WORLD_CUP_IRAN_TIMEZONE", "Asia/Tehran")
+
+# X / Twitter API
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
+TRUMP_X_USERNAME = os.getenv("TRUMP_X_USERNAME", "realDonaldTrump")
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -157,7 +158,7 @@ async def football_data_get(endpoint: str, params: Optional[Dict[str, Any]] = No
     if not FOOTBALL_DATA_TOKEN:
         raise ValueError(
             "Missing FOOTBALL_DATA_TOKEN environment variable in Render. "
-            "Add it in Render → Environment."
+            "Add it in Render -> Environment."
         )
 
     headers = {
@@ -175,9 +176,7 @@ async def football_data_get(endpoint: str, params: Optional[Dict[str, Any]] = No
         except Exception:
             details = response.text
 
-        raise ValueError(
-            f"football-data.org API error {response.status_code}: {details}"
-        )
+        raise ValueError(f"football-data.org API error {response.status_code}: {details}")
 
     return response.json()
 
@@ -299,6 +298,17 @@ async def get_world_cup_matches_range(date_from: str, date_to: str) -> List[Dict
     return data.get("matches", [])
 
 
+async def get_all_world_cup_matches() -> List[Dict[str, Any]]:
+    endpoint = f"competitions/{WORLD_CUP_COMPETITION}/matches"
+
+    params = {
+        "season": WORLD_CUP_SEASON,
+    }
+
+    data = await football_data_get(endpoint, params)
+    return data.get("matches", [])
+
+
 async def get_world_cup_live_matches() -> List[Dict[str, Any]]:
     today = datetime.now(ZoneInfo(EU_TIMEZONE)).date()
     date_from = (today - timedelta(days=1)).isoformat()
@@ -321,18 +331,28 @@ async def get_world_cup_standings() -> List[Dict[str, Any]]:
     return data.get("standings", [])
 
 
-def extract_group_label(standing: Dict[str, Any]) -> str:
-    raw_group = standing.get("group")
-    raw_type = standing.get("type")
+def extract_group_label_from_value(value: Any) -> str:
+    if value is None:
+        return "Unknown Group"
 
-    value = raw_group or raw_type or "Unknown Group"
-    return str(value).strip()
+    value = str(value).strip()
+
+    if not value:
+        return "Unknown Group"
+
+    return value
 
 
-def extract_group_letter(standing: Dict[str, Any]) -> Optional[str]:
-    label = extract_group_label(standing).upper().strip()
+def normalize_group_label(value: Any) -> str:
+    label = extract_group_label_from_value(value).upper().strip()
+    label = label.replace("-", "_").replace(" ", "_")
+    return label
 
-    match = re.search(r"GROUP[\s_-]*([A-Z])", label)
+
+def extract_group_letter_from_label(value: Any) -> Optional[str]:
+    label = normalize_group_label(value)
+
+    match = re.search(r"GROUP_?([A-Z])", label)
     if match:
         return match.group(1)
 
@@ -340,6 +360,38 @@ def extract_group_letter(standing: Dict[str, Any]) -> Optional[str]:
         return label
 
     return None
+
+
+def extract_group_label(standing: Dict[str, Any]) -> str:
+    raw_group = standing.get("group")
+    raw_type = standing.get("type")
+
+    value = raw_group or raw_type or "Unknown Group"
+    return extract_group_label_from_value(value)
+
+
+def extract_group_letter(standing: Dict[str, Any]) -> Optional[str]:
+    return extract_group_letter_from_label(extract_group_label(standing))
+
+
+def group_matches_requested_group(standing: Dict[str, Any], requested_group: str) -> bool:
+    requested = requested_group.strip().upper()
+    requested = requested.replace("GROUP", "").replace("_", "").replace("-", "").strip()
+
+    standing_letter = extract_group_letter(standing)
+
+    if standing_letter and standing_letter == requested:
+        return True
+
+    label = normalize_group_label(extract_group_label(standing))
+
+    possible_labels = {
+        requested,
+        f"GROUP_{requested}",
+        f"GROUP{requested}",
+    }
+
+    return label in possible_labels or label.endswith(f"GROUP_{requested}") or label.endswith(f"GROUP{requested}")
 
 
 def format_standing_table(standing: Dict[str, Any]) -> str:
@@ -384,26 +436,275 @@ def format_standing_table(standing: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def group_matches_requested_group(standing: Dict[str, Any], requested_group: str) -> bool:
-    requested = requested_group.strip().upper()
-    requested = requested.replace("GROUP", "").replace("_", "").replace("-", "").strip()
+def initialize_group_team(table: Dict[str, Dict[str, Any]], team_name: str) -> None:
+    if team_name not in table:
+        table[team_name] = {
+            "team": team_name,
+            "played": 0,
+            "won": 0,
+            "draw": 0,
+            "lost": 0,
+            "goals_for": 0,
+            "goals_against": 0,
+            "goal_difference": 0,
+            "points": 0,
+        }
 
-    standing_letter = extract_group_letter(standing)
 
-    if standing_letter and standing_letter == requested:
-        return True
+def build_group_tables_from_matches(matches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """
+    Builds group tables from match list.
 
-    label = extract_group_label(standing).upper()
-    normalized = label.replace("_", " ").replace("-", " ")
+    It includes scheduled teams with 0 points and updates stats for FINISHED matches.
+    This helps when football-data.org does not expose group standings yet.
+    """
+    groups: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-    possible_labels = [
-        requested,
-        f"GROUP {requested}",
-        f"GROUP_{requested}",
-        f"GROUP-{requested}",
+    for match in matches:
+        raw_group = match.get("group")
+
+        if not raw_group:
+            continue
+
+        group_letter = extract_group_letter_from_label(raw_group)
+        group_key = group_letter or str(raw_group).replace("_", " ").title()
+
+        home = match.get("homeTeam", {}).get("name")
+        away = match.get("awayTeam", {}).get("name")
+
+        if not home or not away:
+            continue
+
+        if group_key not in groups:
+            groups[group_key] = {}
+
+        table = groups[group_key]
+
+        initialize_group_team(table, home)
+        initialize_group_team(table, away)
+
+        status = match.get("status")
+        if status != "FINISHED":
+            continue
+
+        score = match.get("score", {}) or {}
+        full_time = score.get("fullTime", {}) or {}
+
+        home_goals = full_time.get("home")
+        away_goals = full_time.get("away")
+
+        if home_goals is None or away_goals is None:
+            continue
+
+        table[home]["played"] += 1
+        table[away]["played"] += 1
+
+        table[home]["goals_for"] += home_goals
+        table[home]["goals_against"] += away_goals
+
+        table[away]["goals_for"] += away_goals
+        table[away]["goals_against"] += home_goals
+
+        if home_goals > away_goals:
+            table[home]["won"] += 1
+            table[away]["lost"] += 1
+            table[home]["points"] += 3
+        elif away_goals > home_goals:
+            table[away]["won"] += 1
+            table[home]["lost"] += 1
+            table[away]["points"] += 3
+        else:
+            table[home]["draw"] += 1
+            table[away]["draw"] += 1
+            table[home]["points"] += 1
+            table[away]["points"] += 1
+
+        table[home]["goal_difference"] = table[home]["goals_for"] - table[home]["goals_against"]
+        table[away]["goal_difference"] = table[away]["goals_for"] - table[away]["goals_against"]
+
+    return groups
+
+
+def format_derived_group_table(group_key: str, table: Dict[str, Dict[str, Any]]) -> str:
+    rows = list(table.values())
+
+    rows.sort(
+        key=lambda row: (
+            row["points"],
+            row["goal_difference"],
+            row["goals_for"],
+            row["team"],
+        ),
+        reverse=True,
+    )
+
+    group_title = f"Group {group_key}" if re.fullmatch(r"[A-Z]", str(group_key)) else str(group_key)
+
+    lines = [
+        group_title,
+        "Source: calculated from football-data.org match list",
+        "",
     ]
 
-    return any(possible in label or possible in normalized for possible in possible_labels)
+    if not rows:
+        lines.append("No teams found for this group.")
+        return "\n".join(lines)
+
+    for index, row in enumerate(rows, start=1):
+        lines.append(
+            f"{index}. {row['team']} — {row['points']} pts "
+            f"(P{row['played']}, W{row['won']}, D{row['draw']}, L{row['lost']}, "
+            f"GF{row['goals_for']}, GA{row['goals_against']}, GD{row['goal_difference']})"
+        )
+
+    return "\n".join(lines)
+
+
+async def get_best_world_cup_group_tables() -> Dict[str, str]:
+    """
+    Returns group tables as text.
+
+    First tries official standings endpoint.
+    If groups are not available there, derives group tables from matches.
+    """
+    result: Dict[str, str] = {}
+
+    try:
+        standings = await get_world_cup_standings()
+    except Exception:
+        standings = []
+
+    for standing in standings:
+        letter = extract_group_letter(standing)
+        if letter:
+            result[letter] = format_standing_table(standing)
+
+    if result:
+        return result
+
+    matches = await get_all_world_cup_matches()
+    derived_groups = build_group_tables_from_matches(matches)
+
+    for group_key, table in derived_groups.items():
+        result[str(group_key).upper()] = format_derived_group_table(str(group_key).upper(), table)
+
+    return result
+
+
+def build_available_groups_debug_from_matches(matches: List[Dict[str, Any]]) -> str:
+    lines = ["Available group labels from match list:", ""]
+
+    seen = set()
+
+    for match in matches:
+        raw_group = match.get("group")
+        if not raw_group:
+            continue
+
+        home = match.get("homeTeam", {}).get("name") or "Home"
+        away = match.get("awayTeam", {}).get("name") or "Away"
+
+        item = f"{raw_group}: {home} vs {away}"
+        if item not in seen:
+            lines.append(item)
+            seen.add(item)
+
+    if len(lines) == 2:
+        lines.append("No group labels found in match list.")
+
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------
+# X / Trump latest posts logic
+# ------------------------------------------------------------
+
+async def x_api_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not X_BEARER_TOKEN:
+        raise ValueError(
+            "Missing X_BEARER_TOKEN environment variable in Render. "
+            "Add it if you want /trump to fetch latest X posts."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {X_BEARER_TOKEN}",
+    }
+
+    url = f"https://api.x.com/2/{endpoint.lstrip('/')}"
+
+    async with httpx.AsyncClient(timeout=25.0) as client:
+        response = await client.get(url, headers=headers, params=params or {})
+
+    if response.status_code >= 400:
+        try:
+            details = response.json()
+        except Exception:
+            details = response.text
+
+        raise ValueError(f"X API error {response.status_code}: {details}")
+
+    return response.json()
+
+
+async def get_x_user_id(username: str) -> str:
+    data = await x_api_get(
+        f"users/by/username/{username}",
+        {
+            "user.fields": "id,name,username",
+        },
+    )
+
+    user_data = data.get("data")
+    if not user_data or not user_data.get("id"):
+        raise ValueError(f"Could not find X user @{username}.")
+
+    return user_data["id"]
+
+
+async def get_latest_x_posts(username: str, limit: int = 5) -> List[Dict[str, Any]]:
+    limit = max(1, min(limit, 10))
+
+    user_id = await get_x_user_id(username)
+
+    data = await x_api_get(
+        f"users/{user_id}/tweets",
+        {
+            "max_results": max(5, limit),
+            "tweet.fields": "created_at,public_metrics",
+            "exclude": "retweets,replies",
+        },
+    )
+
+    posts = data.get("data", [])
+    return posts[:limit]
+
+
+def format_x_post(username: str, post: Dict[str, Any], index: int) -> str:
+    post_id = post.get("id")
+    text = post.get("text", "")
+    created_at = post.get("created_at")
+
+    created_text = "time unavailable"
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            eu_dt = dt.astimezone(ZoneInfo(EU_TIMEZONE))
+            iran_dt = dt.astimezone(ZoneInfo(IRAN_TIMEZONE))
+            created_text = (
+                f"EU: {eu_dt.strftime('%d %b %Y, %H:%M %Z')} | "
+                f"Iran: {iran_dt.strftime('%d %b %Y, %H:%M %Z')}"
+            )
+        except Exception:
+            created_text = created_at
+
+    url = f"https://x.com/{username}/status/{post_id}" if post_id else f"https://x.com/{username}"
+
+    return (
+        f"{index}. @{username}\n"
+        f"{created_text}\n"
+        f"{text}\n"
+        f"{url}"
+    )
 
 
 # ------------------------------------------------------------
@@ -592,27 +893,24 @@ def apply_beach_filter(img: Image.Image) -> Image.Image:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Hello! I can calculate Collatz sequences, edit photos, and show World Cup 2026 info.\n\n"
+        "Hello! I can calculate Collatz sequences, edit photos, show World Cup 2026 info, and fetch latest X posts.\n\n"
         "Math:\n"
         "/collatz 27 - calculate Collatz and send all steps as a text file\n\n"
         "Photos:\n"
         "/vintage - send a photo and I make it vintage\n"
         "/cartoon - send a photo and I make it cartoon style\n"
         "/caricature - send a photo and I make it fun caricature style\n"
-        "/caricator - same as /caricature\n"
         "/sticker - send a photo and I make it sticker style\n"
-        "/stiker - same as /sticker\n"
-        "/beach - send a photo and I make it summer/beach style\n"
-        "/summer - same as /beach\n"
-        "/vacation - same as /beach\n\n"
+        "/beach - send a photo and I make it summer/beach style\n\n"
         "World Cup 2026:\n"
         "/wc_today - today's matches in EU and Iran time\n"
         "/wc_tomorrow - tomorrow's matches in EU and Iran time\n"
         "/wc_live - live World Cup matches\n"
         "/wc_group A - Group A standings as a text file\n"
         "/wc_standings - all group standings as a text file\n\n"
-        "/cancel - cancel current photo mode\n\n"
-        "In a group, commands are the most reliable way to talk to me."
+        "X / Twitter:\n"
+        "/trump - latest posts from configured Trump X account\n\n"
+        "/cancel - cancel current photo mode"
     )
 
 
@@ -749,63 +1047,42 @@ async def wc_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     requested_group = requested_group.replace("GROUP", "").replace("_", "").replace("-", "").strip()
 
     try:
-        standings = await get_world_cup_standings()
+        group_tables = await get_best_world_cup_group_tables()
 
-        if not standings:
-            await update.message.reply_text(
-                "No World Cup standings found yet.\n\n"
-                "This may happen if football-data.org has not published World Cup 2026 group tables yet."
-            )
-            return
-
-        matching_standing = None
-
-        for standing in standings:
-            if group_matches_requested_group(standing, requested_group):
-                matching_standing = standing
-                break
-
-        if not matching_standing:
-            available_groups = []
-
-            for standing in standings:
-                label = extract_group_label(standing)
-                letter = extract_group_letter(standing)
-
-                if letter:
-                    available_groups.append(f"Group {letter} — raw label: {label}")
-                else:
-                    available_groups.append(f"Unknown group — raw label: {label}")
-
-            debug_text = "\n".join(available_groups) if available_groups else "No group labels returned."
-
-            filename = "world_cup_available_groups_debug.txt"
-            file_output = text_to_file(debug_text, filename)
+        if requested_group in group_tables:
+            text = group_tables[requested_group]
+            filename = f"world_cup_group_{requested_group}_standings.txt"
+            file_output = text_to_file(text, filename)
 
             await update.message.reply_text(
-                f"Could not find Group {requested_group}.\n\n"
-                "I attached a debug file showing the group labels returned by football-data.org."
+                f"World Cup Group {requested_group} standings are ready.\n"
+                "I attached them as a text file."
             )
 
             await update.message.reply_document(
                 document=InputFile(file_output, filename=filename),
-                caption="Available World Cup group labels from API",
+                caption=f"World Cup Group {requested_group} standings",
             )
             return
 
-        text = format_standing_table(matching_standing)
+        matches = await get_all_world_cup_matches()
+        debug_text = build_available_groups_debug_from_matches(matches)
 
-        filename = f"world_cup_group_{requested_group}_standings.txt"
-        file_output = text_to_file(text, filename)
+        if group_tables:
+            debug_text += "\n\nAvailable generated group tables:\n"
+            debug_text += "\n".join([f"Group {key}" for key in sorted(group_tables.keys())])
+
+        filename = "world_cup_available_groups_debug.txt"
+        file_output = text_to_file(debug_text, filename)
 
         await update.message.reply_text(
-            f"World Cup Group {requested_group} standings are ready.\n"
-            "I attached them as a text file."
+            f"Could not find Group {requested_group}.\n\n"
+            "I attached a debug file showing available group labels."
         )
 
         await update.message.reply_document(
             document=InputFile(file_output, filename=filename),
-            caption=f"World Cup Group {requested_group} standings",
+            caption="Available World Cup group labels",
         )
 
     except Exception as error:
@@ -814,10 +1091,24 @@ async def wc_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        standings = await get_world_cup_standings()
+        group_tables = await get_best_world_cup_group_tables()
 
-        if not standings:
-            await update.message.reply_text("No World Cup standings found yet.")
+        if not group_tables:
+            matches = await get_all_world_cup_matches()
+            debug_text = build_available_groups_debug_from_matches(matches)
+
+            filename = "world_cup_standings_debug.txt"
+            file_output = text_to_file(debug_text, filename)
+
+            await update.message.reply_text(
+                "No World Cup group standings found yet.\n"
+                "I attached a debug file showing match/group labels returned by the API."
+            )
+
+            await update.message.reply_document(
+                document=InputFile(file_output, filename=filename),
+                caption="World Cup standings debug",
+            )
             return
 
         lines = [
@@ -825,8 +1116,8 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
             "",
         ]
 
-        for standing in standings:
-            lines.append(format_standing_table(standing))
+        for key in sorted(group_tables.keys()):
+            lines.append(group_tables[key])
             lines.append("")
             lines.append("-" * 60)
             lines.append("")
@@ -848,6 +1139,48 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as error:
         await update.message.reply_text(f"Could not load World Cup standings.\n\nError: {error}")
+
+
+async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        count = 5
+
+        if context.args:
+            try:
+                count = int(context.args[0])
+            except ValueError:
+                count = 5
+
+        count = max(1, min(count, 10))
+
+        posts = await get_latest_x_posts(TRUMP_X_USERNAME, count)
+
+        if not posts:
+            await update.message.reply_text(f"No recent posts found for @{TRUMP_X_USERNAME}.")
+            return
+
+        lines = [
+            f"Latest {len(posts)} X posts from @{TRUMP_X_USERNAME}",
+            "",
+        ]
+
+        for index, post in enumerate(posts, start=1):
+            lines.append(format_x_post(TRUMP_X_USERNAME, post, index))
+            lines.append("")
+            lines.append("-" * 40)
+            lines.append("")
+
+        text = "\n".join(lines)
+
+        for chunk in split_long_text(text):
+            await update.message.reply_text(chunk)
+
+    except Exception as error:
+        await update.message.reply_text(
+            f"Could not load latest X posts.\n\n"
+            f"Error: {error}\n\n"
+            f"To use this command, add X_BEARER_TOKEN in Render."
+        )
 
 
 async def set_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
@@ -1001,6 +1334,8 @@ telegram_app.add_handler(CommandHandler("wc_live", wc_live_command))
 telegram_app.add_handler(CommandHandler("wc_group", wc_group_command))
 telegram_app.add_handler(CommandHandler("wc_standings", wc_standings_command))
 
+telegram_app.add_handler(CommandHandler(["trump", "Trump"], trump_command))
+
 telegram_app.add_handler(CommandHandler("vintage", vintage_command))
 telegram_app.add_handler(CommandHandler("cartoon", cartoon_command))
 telegram_app.add_handler(CommandHandler("caricature", caricature_command))
@@ -1050,6 +1385,7 @@ async def root():
             "/wc_live",
             "/wc_group A",
             "/wc_standings",
+            "/trump",
             "/vintage",
             "/cartoon",
             "/caricature",
@@ -1063,6 +1399,7 @@ async def root():
             "central_europe": EU_TIMEZONE,
             "iran": IRAN_TIMEZONE,
         },
+        "x_username": TRUMP_X_USERNAME,
     }
 
 
