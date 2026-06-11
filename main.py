@@ -729,7 +729,19 @@ async def wc_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        await update.message.reply_text(format_standing_table(match))
+        text = format_standing_table(match)
+        filename = f"world_cup_group_{requested_group}_standings.txt"
+        file_output = text_to_file(text, filename)
+
+        await update.message.reply_text(
+            f"World Cup Group {requested_group} standings are ready.\n"
+            f"I attached them as a text file."
+        )
+
+        await update.message.reply_document(
+            document=InputFile(file_output, filename=filename),
+            caption=f"World Cup Group {requested_group} standings",
+        )
 
     except Exception as error:
         await update.message.reply_text(f"Could not load World Cup standings.\n\nError: {error}")
@@ -743,14 +755,31 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("No World Cup standings found yet.")
             return
 
-        lines = ["World Cup 2026 group standings", ""]
+        lines = [
+            "World Cup 2026 group standings",
+            "",
+        ]
 
         for standing in standings:
             lines.append(format_standing_table(standing))
             lines.append("")
+            lines.append("-" * 60)
+            lines.append("")
 
-        for chunk in split_long_text("\n".join(lines)):
-            await update.message.reply_text(chunk)
+        text = "\n".join(lines)
+
+        filename = "world_cup_2026_all_group_standings.txt"
+        file_output = text_to_file(text, filename)
+
+        await update.message.reply_text(
+            "World Cup 2026 group standings are ready.\n"
+            "I attached them as a text file."
+        )
+
+        await update.message.reply_document(
+            document=InputFile(file_output, filename=filename),
+            caption="World Cup 2026 all group standings",
+        )
 
     except Exception as error:
         await update.message.reply_text(f"Could not load World Cup standings.\n\nError: {error}")
