@@ -15,7 +15,7 @@ from telegram.ext import (
 
 
 MAX_INPUT = 10**12
-MAX_RETURNED_SEQUENCE_ITEMS = 120
+TELEGRAM_MESSAGE_LIMIT = 3500
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-app-name.onrender.com
@@ -43,39 +43,60 @@ def collatz_sequence(n: int) -> List[int]:
             n //= 2
         else:
             n = 3 * n + 1
+
         seq.append(n)
 
     return seq
 
 
-def summarize_sequence(n: int) -> str:
+def build_collatz_messages(n: int, message_limit: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
+    """
+    Build one or more Telegram messages for the full Collatz sequence.
+
+    Telegram messages have a length limit, so long sequences are split
+    into multiple messages instead of being shortened with "...".
+    """
     if n > MAX_INPUT:
         raise ValueError(f"Please use a number up to {MAX_INPUT:,}.")
 
     seq = collatz_sequence(n)
+
     steps = len(seq) - 1
     max_value = max(seq)
     peak_index = seq.index(max_value)
 
-    if len(seq) <= MAX_RETURNED_SEQUENCE_ITEMS:
-        sequence_text = " → ".join(map(str, seq))
-    else:
-        head = " → ".join(map(str, seq[:60]))
-        tail = " → ".join(map(str, seq[-20:]))
-        sequence_text = f"{head} → ... → {tail}"
+    messages = [
+        (
+            f"Collatz result for n = {n}\n\n"
+            f"Steps to reach 1: {steps}\n"
+            f"Maximum value reached: {max_value}\n"
+            f"Peak reached at step: {peak_index}\n"
+            f"Sequence length: {len(seq)} numbers"
+        )
+    ]
 
-    return (
-        f"Collatz result for n = {n}\n\n"
-        f"Steps to reach 1: {steps}\n"
-        f"Maximum value reached: {max_value}\n"
-        f"Peak reached at step: {peak_index}\n"
-        f"Sequence length: {len(seq)} numbers\n\n"
-        f"Sequence:\n{sequence_text}"
-    )
+    current_message = "Full sequence:\n"
+
+    for index, value in enumerate(seq):
+        if index == 0:
+            piece = str(value)
+        else:
+            piece = f" → {value}"
+
+        if len(current_message) + len(piece) > message_limit:
+            messages.append(current_message)
+            current_message = f"Sequence continued:\n{value}"
+        else:
+            current_message += piece
+
+    if current_message.strip():
+        messages.append(current_message)
+
+    return messages
 
 
 # ------------------------------------------------------------
-# Helpers
+# Image helper functions
 # ------------------------------------------------------------
 
 def resize_for_telegram(img: Image.Image, max_size: int = 1400) -> Image.Image:
@@ -91,9 +112,11 @@ def image_to_bytes(img: Image.Image, image_format: str = "JPEG") -> BytesIO:
         img = img.convert("RGB")
         img.save(output, format="JPEG", quality=92, optimize=True)
         output.name = "edited_photo.jpg"
+
     elif image_format.upper() == "PNG":
         img.save(output, format="PNG", optimize=True)
         output.name = "edited_photo.png"
+
     else:
         raise ValueError("Unsupported image format.")
 
@@ -106,6 +129,7 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
     Converts:
     /vintage
     /vintage@MyBot
+
     into:
     vintage
     """
@@ -113,10 +137,12 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
         return None
 
     first = caption.strip().split()[0].lower()
+
     if not first.startswith("/"):
         return None
 
     first = first[1:]
+
     if "@" in first:
         first = first.split("@", 1)[0]
 
@@ -124,7 +150,7 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
 
 
 # ------------------------------------------------------------
-# Filters
+# Image filters
 # ------------------------------------------------------------
 
 def apply_vintage_filter(img: Image.Image) -> Image.Image:
@@ -141,7 +167,6 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
 
     img = img.filter(ImageFilter.GaussianBlur(radius=0.25))
 
-    # Soft vignette
     width, height = img.size
     small = 280
     mask = Image.new("L", (small, small), 0)
@@ -164,34 +189,63 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
 
 def apply_cartoon_filter(img: Image.Image) -> Image.Image:
     """
-    Improved cartoon filter:
-    - smooths flat regions
-    - boosts colors
-    - posterizes
-    - overlays black edges
+    Improved cartoon filter.
+
+    This version avoids the black-photo problem by using a proper edge mask:
+    white areas keep the image, black areas create outline strokes.
     """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
     base = img.filter(ImageFilter.MedianFilter(size=5))
     base = base.filter(ImageFilter.SMOOTH_MORE)
-    base = ImageEnhance.Color(base).enhance(1.7)
-    base = ImageEnhance.Contrast(base).enhance(1.3)
+    base = ImageEnhance.Color(base).enhance(1.65)
+    base = ImageEnhance.Contrast(base).enhance(1.25)
+    base = ImageEnhance.Brightness(base).enhance(1.04)
     base = ImageOps.posterize(base, bits=4)
 
-    # Edge mask: white background with black edges
     gray = ImageOps.grayscale(img)
     edges = gray.filter(ImageFilter.FIND_EDGES)
-    edges = ImageEnhance.Contrast(edges).enhance(2.0)
+    edges = ImageOps.autocontrast(edges)
     edges = ImageOps.invert(edges)
-    edges = edges.point(lambda p: 255 if p > 110 else 0)
 
-    # Multiply with edge mask so black edges are kept and non-edges stay intact
-    edge_rgb = edges.convert("RGB")
-    cartoon = ImageChops.multiply(base, edge_rgb)
+    # Mostly white image with black edges.
+    edges = edges.point(lambda p: 255 if p > 80 else 0)
 
-    cartoon = ImageEnhance.Sharpness(cartoon).enhance(1.5)
+    cartoon = ImageChops.multiply(base, edges.convert("RGB"))
+    cartoon = ImageEnhance.Sharpness(cartoon).enhance(1.4)
+
     return cartoon
+
+
+def apply_caricature_filter(img: Image.Image) -> Image.Image:
+    """
+    Fun caricature-style filter.
+
+    This is a safe filter-based caricature:
+    stronger colors, stronger contrast, stronger outlines.
+    It does not reshape bodies or undress people.
+    """
+    img = img.convert("RGB")
+    img = resize_for_telegram(img)
+
+    base = img.filter(ImageFilter.MedianFilter(size=7))
+    base = base.filter(ImageFilter.SMOOTH_MORE)
+    base = ImageEnhance.Color(base).enhance(2.0)
+    base = ImageEnhance.Contrast(base).enhance(1.45)
+    base = ImageEnhance.Brightness(base).enhance(1.05)
+    base = ImageOps.posterize(base, bits=3)
+
+    gray = ImageOps.grayscale(img)
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageOps.autocontrast(edges)
+    edges = ImageOps.invert(edges)
+    edges = edges.point(lambda p: 255 if p > 90 else 0)
+
+    caricature = ImageChops.multiply(base, edges.convert("RGB"))
+    caricature = ImageEnhance.Sharpness(caricature).enhance(1.8)
+
+    return caricature
 
 
 def apply_sticker_filter(img: Image.Image) -> Image.Image:
@@ -231,7 +285,10 @@ def apply_sticker_filter(img: Image.Image) -> Image.Image:
 def apply_beach_filter(img: Image.Image) -> Image.Image:
     """
     Summer / beach style as a clean photo filter only.
-    No sunglasses, no stickers, no icons.
+
+    No sunglasses.
+    No stickers.
+    No clothing/body changes.
     """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
@@ -244,50 +301,19 @@ def apply_beach_filter(img: Image.Image) -> Image.Image:
     img = Image.blend(img, warm_overlay, 0.10)
 
     img = ImageEnhance.Sharpness(img).enhance(1.15)
+
     return img
 
 
-def apply_caricature_filter(img: Image.Image) -> Image.Image:
-    """
-    Fun caricature mood:
-    more exaggerated than cartoon:
-    - stronger saturation
-    - stronger contrast
-    - heavier posterization
-    - darker outlines
-    """
-    img = img.convert("RGB")
-    img = resize_for_telegram(img)
-
-    base = img.filter(ImageFilter.MedianFilter(size=7))
-    base = base.filter(ImageFilter.SMOOTH_MORE)
-    base = ImageEnhance.Color(base).enhance(2.0)
-    base = ImageEnhance.Contrast(base).enhance(1.45)
-    base = ImageEnhance.Brightness(base).enhance(1.05)
-    base = ImageOps.posterize(base, bits=3)
-
-    gray = ImageOps.grayscale(img)
-    edges = gray.filter(ImageFilter.FIND_EDGES)
-    edges = ImageEnhance.Contrast(edges).enhance(2.6)
-    edges = ImageOps.invert(edges)
-    edges = edges.point(lambda p: 255 if p > 120 else 0)
-
-    edge_rgb = edges.convert("RGB")
-    caricature = ImageChops.multiply(base, edge_rgb)
-    caricature = ImageEnhance.Sharpness(caricature).enhance(1.8)
-
-    return caricature
-
-
 # ------------------------------------------------------------
-# Commands
+# Telegram commands
 # ------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hello! I can calculate Collatz sequences and edit photos.\n\n"
         "Commands:\n"
-        "/collatz 27 - calculate Collatz sequence\n"
+        "/collatz 27 - calculate and show the full Collatz sequence\n"
         "/vintage - send a photo and I make it vintage\n"
         "/cartoon - send a photo and I make it cartoon style\n"
         "/caricature - send a photo and I make it fun caricature style\n"
@@ -313,7 +339,11 @@ async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         n = int(context.args[0])
-        await update.message.reply_text(summarize_sequence(n))
+        messages = build_collatz_messages(n)
+
+        for message in messages:
+            await update.message.reply_text(message)
+
     except ValueError as error:
         await update.message.reply_text(
             f"{error}\n\nPlease send a positive whole number, for example:\n/collatz 27"
@@ -356,6 +386,7 @@ async def beach_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("photo_mode", None)
+
     await update.message.reply_text(
         "Cancelled. Send /vintage, /cartoon, /caricature, /sticker, /beach, or /collatz 27."
     )
@@ -363,6 +394,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
+
     if not message or not message.photo:
         return
 
@@ -452,17 +484,17 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text(f"Sorry, I could not process that photo.\n\nError: {error}")
 
     finally:
-        # Remove mode after one photo
         context.user_data.pop("photo_mode", None)
 
 
 # ------------------------------------------------------------
-# Register handlers
+# Register Telegram handlers
 # ------------------------------------------------------------
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(CommandHandler("collatz", collatz_command))
+
 telegram_app.add_handler(CommandHandler("vintage", vintage_command))
 telegram_app.add_handler(CommandHandler("cartoon", cartoon_command))
 telegram_app.add_handler(CommandHandler("caricature", caricature_command))
@@ -473,6 +505,7 @@ telegram_app.add_handler(CommandHandler("beach", beach_command))
 telegram_app.add_handler(CommandHandler("summer", beach_command))
 telegram_app.add_handler(CommandHandler("vacation", beach_command))
 telegram_app.add_handler(CommandHandler("cancel", cancel_command))
+
 telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
 
