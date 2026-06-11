@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.0
 python-telegram-bot==22.7
 pillow==11.1.0
 httpx==0.28.1
+feedparser==6.0.11

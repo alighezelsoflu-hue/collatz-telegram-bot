@@ -4,7 +4,8 @@ from io import BytesIO
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-
+import feedparser
+from urllib.parse import quote_plus
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageChops
@@ -38,7 +39,6 @@ EU_TIMEZONE = os.getenv("WORLD_CUP_EU_TIMEZONE", "Europe/Berlin")
 IRAN_TIMEZONE = os.getenv("WORLD_CUP_IRAN_TIMEZONE", "Asia/Tehran")
 
 # X / Twitter API
-X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 TRUMP_X_USERNAME = os.getenv("TRUMP_X_USERNAME", "realDonaldTrump")
 
 if not TOKEN:
@@ -1143,31 +1143,32 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        count = 5
+        query = quote_plus('Trump latest post OR tweet site:x.com/realDonaldTrump')
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
-        if context.args:
-            try:
-                count = int(context.args[0])
-            except ValueError:
-                count = 5
+        feed = feedparser.parse(rss_url)
+        entries = feed.entries[:5]
 
-        count = max(1, min(count, 10))
-
-        posts = await get_latest_x_posts(TRUMP_X_USERNAME, count)
-
-        if not posts:
-            await update.message.reply_text(f"No recent posts found for @{TRUMP_X_USERNAME}.")
+        if not entries:
+            await update.message.reply_text(
+                "I could not find recent Trump/X-related news right now."
+            )
             return
 
         lines = [
-            f"Latest {len(posts)} X posts from @{TRUMP_X_USERNAME}",
+            "Latest Trump/X-related news",
+            "Source: Google News RSS",
             "",
         ]
 
-        for index, post in enumerate(posts, start=1):
-            lines.append(format_x_post(TRUMP_X_USERNAME, post, index))
-            lines.append("")
-            lines.append("-" * 40)
+        for index, entry in enumerate(entries, start=1):
+            title = getattr(entry, "title", "No title")
+            link = getattr(entry, "link", "")
+            published = getattr(entry, "published", "time unavailable")
+
+            lines.append(f"{index}. {title}")
+            lines.append(f"Published: {published}")
+            lines.append(link)
             lines.append("")
 
         text = "\n".join(lines)
@@ -1177,9 +1178,7 @@ async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     except Exception as error:
         await update.message.reply_text(
-            f"Could not load latest X posts.\n\n"
-            f"Error: {error}\n\n"
-            f"To use this command, add X_BEARER_TOKEN in Render."
+            f"Could not load Trump-related news.\n\nError: {error}"
         )
 
 
