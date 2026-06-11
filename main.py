@@ -1,6 +1,6 @@
 import os
 from io import BytesIO
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import FastAPI, Request, HTTPException
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageChops
@@ -15,7 +15,6 @@ from telegram.ext import (
 
 
 MAX_INPUT = 10**12
-TELEGRAM_MESSAGE_LIMIT = 3500
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  
@@ -49,10 +48,12 @@ def collatz_sequence(n: int) -> List[int]:
     return seq
 
 
-def build_collatz_text_report(n: int) -> str:
+def build_collatz_text_report(n: int) -> Tuple[str, int, int, int, int]:
     """
     Build a full Collatz report as plain text.
-    This will be sent to the user as a .txt file.
+
+    Returns:
+    report_text, steps, max_value, peak_index, sequence_length
     """
     if n > MAX_INPUT:
         raise ValueError(f"Please use a number up to {MAX_INPUT:,}.")
@@ -62,6 +63,7 @@ def build_collatz_text_report(n: int) -> str:
     steps = len(seq) - 1
     max_value = max(seq)
     peak_index = seq.index(max_value)
+    sequence_length = len(seq)
 
     lines = [
         f"Collatz report for n = {n}",
@@ -69,10 +71,11 @@ def build_collatz_text_report(n: int) -> str:
         f"Steps to reach 1: {steps}",
         f"Maximum value reached: {max_value}",
         f"Peak reached at step: {peak_index}",
-        f"Sequence length: {len(seq)} numbers",
+        f"Sequence length: {sequence_length} numbers",
         "",
         "Full step-by-step sequence:",
         "",
+        f"Start: {seq[0]}",
     ]
 
     for index in range(len(seq) - 1):
@@ -96,52 +99,17 @@ def build_collatz_text_report(n: int) -> str:
         ]
     )
 
-    return "\n".join(lines)
+    report_text = "\n".join(lines)
+
+    return report_text, steps, max_value, peak_index, sequence_length
 
 
 def text_to_file(text: str, filename: str) -> BytesIO:
-    """
-    Convert text into a file-like object Telegram can send.
-    """
     output = BytesIO()
     output.write(text.encode("utf-8"))
     output.seek(0)
     output.name = filename
     return output
-
-
-async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
-        await update.message.reply_text("Usage: /collatz 27")
-        return
-
-    try:
-        n = int(context.args[0])
-
-        seq = collatz_sequence(n)
-        steps = len(seq) - 1
-        max_value = max(seq)
-
-        report_text = build_collatz_text_report(n)
-        file_output = text_to_file(report_text, f"collatz_{n}_steps.txt")
-
-        await update.message.reply_text(
-            f"Collatz result for n = {n}\n\n"
-            f"Steps to reach 1: {steps}\n"
-            f"Maximum value reached: {max_value}\n\n"
-            f"I attached the full step-by-step sequence as a text file."
-        )
-
-        await update.message.reply_document(
-            document=InputFile(file_output),
-            filename=f"collatz_{n}_steps.txt",
-            caption=f"Full Collatz steps for n = {n}",
-        )
-
-    except ValueError as error:
-        await update.message.reply_text(
-            f"{error}\n\nPlease send a positive whole number, for example:\n/collatz 27"
-        )
 
 
 # ------------------------------------------------------------
@@ -237,12 +205,6 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_cartoon_filter(img: Image.Image) -> Image.Image:
-    """
-    Improved cartoon filter.
-
-    This version avoids the black-photo problem by using a proper edge mask:
-    white areas keep the image, black areas create outline strokes.
-    """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
@@ -258,7 +220,6 @@ def apply_cartoon_filter(img: Image.Image) -> Image.Image:
     edges = ImageOps.autocontrast(edges)
     edges = ImageOps.invert(edges)
 
-    # Mostly white image with black edges.
     edges = edges.point(lambda p: 255 if p > 80 else 0)
 
     cartoon = ImageChops.multiply(base, edges.convert("RGB"))
@@ -268,13 +229,6 @@ def apply_cartoon_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_caricature_filter(img: Image.Image) -> Image.Image:
-    """
-    Fun caricature-style filter.
-
-    This is a safe filter-based caricature:
-    stronger colors, stronger contrast, stronger outlines.
-    It does not reshape bodies or undress people.
-    """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
@@ -362,7 +316,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hello! I can calculate Collatz sequences and edit photos.\n\n"
         "Commands:\n"
-        "/collatz 27 - calculate and show the full Collatz sequence\n"
+        "/collatz 27 - calculate Collatz and send all steps as a text file\n"
         "/vintage - send a photo and I make it vintage\n"
         "/cartoon - send a photo and I make it cartoon style\n"
         "/caricature - send a photo and I make it fun caricature style\n"
@@ -388,10 +342,26 @@ async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         n = int(context.args[0])
-        messages = build_collatz_messages(n)
 
-        for message in messages:
-            await update.message.reply_text(message)
+        report_text, steps, max_value, peak_index, sequence_length = build_collatz_text_report(n)
+
+        filename = f"collatz_{n}_steps.txt"
+        file_output = text_to_file(report_text, filename)
+
+        await update.message.reply_text(
+            f"Collatz result for n = {n}\n\n"
+            f"Steps to reach 1: {steps}\n"
+            f"Maximum value reached: {max_value}\n"
+            f"Peak reached at step: {peak_index}\n"
+            f"Sequence length: {sequence_length} numbers\n\n"
+            f"I attached the full step-by-step sequence as a text file."
+        )
+
+        await update.message.reply_document(
+            document=file_output,
+            filename=filename,
+            caption=f"Full Collatz steps for n = {n}",
+        )
 
     except ValueError as error:
         await update.message.reply_text(
