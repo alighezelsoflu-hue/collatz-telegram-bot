@@ -3,7 +3,7 @@ from io import BytesIO
 from typing import List, Optional
 
 from fastapi import FastAPI, Request, HTTPException
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageDraw, ImageFont
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageChops
 from telegram import Update, InputFile
 from telegram.ext import (
     Application,
@@ -75,7 +75,7 @@ def summarize_sequence(n: int) -> str:
 
 
 # ------------------------------------------------------------
-# Image helper functions
+# Helpers
 # ------------------------------------------------------------
 
 def resize_for_telegram(img: Image.Image, max_size: int = 1400) -> Image.Image:
@@ -101,25 +101,13 @@ def image_to_bytes(img: Image.Image, image_format: str = "JPEG") -> BytesIO:
     return output
 
 
-def get_font(size: int) -> ImageFont.ImageFont:
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "arial.ttf",
-    ]
-
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception:
-            continue
-
-    return ImageFont.load_default()
-
-
 def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
     """
-    Converts a Telegram caption command like /vintage or /vintage@MyBot into vintage.
+    Converts:
+    /vintage
+    /vintage@MyBot
+    into:
+    vintage
     """
     if not caption:
         return None
@@ -129,7 +117,6 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
         return None
 
     first = first[1:]
-
     if "@" in first:
         first = first.split("@", 1)[0]
 
@@ -137,7 +124,7 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
 
 
 # ------------------------------------------------------------
-# Image filter functions
+# Filters
 # ------------------------------------------------------------
 
 def apply_vintage_filter(img: Image.Image) -> Image.Image:
@@ -145,26 +132,28 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
     img = resize_for_telegram(img)
 
     img = ImageEnhance.Color(img).enhance(0.58)
-    img = ImageEnhance.Contrast(img).enhance(1.15)
+    img = ImageEnhance.Contrast(img).enhance(1.14)
     img = ImageEnhance.Brightness(img).enhance(1.03)
 
     sepia = ImageOps.grayscale(img)
     sepia = ImageOps.colorize(sepia, "#3b2614", "#f2d6a2")
-    img = Image.blend(img, sepia, 0.62)
+    img = Image.blend(img, sepia, 0.60)
 
     img = img.filter(ImageFilter.GaussianBlur(radius=0.25))
 
+    # Soft vignette
     width, height = img.size
     small = 280
     mask = Image.new("L", (small, small), 0)
-    draw = ImageDraw.Draw(mask)
+    cx, cy = small / 2, small / 2
 
-    for radius in range(small // 2, 0, -1):
-        alpha = int(255 * (radius / (small / 2)) ** 1.7)
-        draw.ellipse(
-            [small // 2 - radius, small // 2 - radius, small // 2 + radius, small // 2 + radius],
-            fill=alpha,
-        )
+    for y in range(small):
+        for x in range(small):
+            dx = (x - cx) / cx
+            dy = (y - cy) / cy
+            distance = (dx * dx + dy * dy) ** 0.5
+            value = int(255 * max(0, 1 - distance * 0.9))
+            mask.putpixel((x, y), value)
 
     mask = mask.resize((width, height), Image.Resampling.LANCZOS)
     dark = Image.new("RGB", (width, height), "#1f1308")
@@ -174,23 +163,34 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_cartoon_filter(img: Image.Image) -> Image.Image:
+    """
+    Improved cartoon filter:
+    - smooths flat regions
+    - boosts colors
+    - posterizes
+    - overlays black edges
+    """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
-    smooth = img.filter(ImageFilter.MedianFilter(size=5))
-    smooth = ImageEnhance.Color(smooth).enhance(1.55)
-    smooth = ImageEnhance.Contrast(smooth).enhance(1.25)
+    base = img.filter(ImageFilter.MedianFilter(size=5))
+    base = base.filter(ImageFilter.SMOOTH_MORE)
+    base = ImageEnhance.Color(base).enhance(1.7)
+    base = ImageEnhance.Contrast(base).enhance(1.3)
+    base = ImageOps.posterize(base, bits=4)
 
-    cartoon = ImageOps.posterize(smooth, bits=4)
-
+    # Edge mask: white background with black edges
     gray = ImageOps.grayscale(img)
     edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageEnhance.Contrast(edges).enhance(2.0)
     edges = ImageOps.invert(edges)
-    edges = edges.point(lambda p: 255 if p > 135 else 0)
+    edges = edges.point(lambda p: 255 if p > 110 else 0)
 
-    black = Image.new("RGB", cartoon.size, "black")
-    cartoon = Image.composite(cartoon, black, ImageOps.invert(edges))
+    # Multiply with edge mask so black edges are kept and non-edges stay intact
+    edge_rgb = edges.convert("RGB")
+    cartoon = ImageChops.multiply(base, edge_rgb)
 
+    cartoon = ImageEnhance.Sharpness(cartoon).enhance(1.5)
     return cartoon
 
 
@@ -230,58 +230,57 @@ def apply_sticker_filter(img: Image.Image) -> Image.Image:
 
 def apply_beach_filter(img: Image.Image) -> Image.Image:
     """
-    Safe beach/summer style: warm color grading, sun icon, and a summer banner.
-    This does not alter clothing or body features.
+    Summer / beach style as a clean photo filter only.
+    No sunglasses, no stickers, no icons.
     """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
-    img = ImageEnhance.Color(img).enhance(1.35)
-    img = ImageEnhance.Contrast(img).enhance(1.12)
-    img = ImageEnhance.Brightness(img).enhance(1.08)
+    img = ImageEnhance.Color(img).enhance(1.30)
+    img = ImageEnhance.Contrast(img).enhance(1.10)
+    img = ImageEnhance.Brightness(img).enhance(1.10)
 
-    overlay = Image.new("RGB", img.size, "#ffd18a")
-    img = Image.blend(img, overlay, 0.12)
+    warm_overlay = Image.new("RGB", img.size, "#ffd89a")
+    img = Image.blend(img, warm_overlay, 0.10)
 
-    width, height = img.size
-    draw = ImageDraw.Draw(img)
-
-    sun_radius = max(26, width // 18)
-    sun_x = width - sun_radius * 2
-    sun_y = sun_radius * 2
-
-    draw.ellipse(
-        [
-            sun_x - sun_radius,
-            sun_y - sun_radius,
-            sun_x + sun_radius,
-            sun_y + sun_radius,
-        ],
-        fill="#ffd43b",
-        outline="#f59f00",
-        width=max(3, width // 300),
-    )
-
-    banner_height = max(70, height // 10)
-    banner = Image.new("RGB", (width, banner_height), "#0ea5e9")
-    img.paste(banner, (0, height - banner_height))
-
-    caption = "SUMMER MODE"
-    font = get_font(size=max(28, width // 24))
-    text_bbox = draw.textbbox((0, 0), caption, font=font)
-    text_width = text_bbox[2] - text_bbox[0]
-    text_height = text_bbox[3] - text_bbox[1]
-
-    text_x = (width - text_width) // 2
-    text_y = height - banner_height + (banner_height - text_height) // 2 - 2
-
-    draw.text((text_x, text_y), caption, fill="white", font=font)
-
+    img = ImageEnhance.Sharpness(img).enhance(1.15)
     return img
 
 
+def apply_caricature_filter(img: Image.Image) -> Image.Image:
+    """
+    Fun caricature mood:
+    more exaggerated than cartoon:
+    - stronger saturation
+    - stronger contrast
+    - heavier posterization
+    - darker outlines
+    """
+    img = img.convert("RGB")
+    img = resize_for_telegram(img)
+
+    base = img.filter(ImageFilter.MedianFilter(size=7))
+    base = base.filter(ImageFilter.SMOOTH_MORE)
+    base = ImageEnhance.Color(base).enhance(2.0)
+    base = ImageEnhance.Contrast(base).enhance(1.45)
+    base = ImageEnhance.Brightness(base).enhance(1.05)
+    base = ImageOps.posterize(base, bits=3)
+
+    gray = ImageOps.grayscale(img)
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageEnhance.Contrast(edges).enhance(2.6)
+    edges = ImageOps.invert(edges)
+    edges = edges.point(lambda p: 255 if p > 120 else 0)
+
+    edge_rgb = edges.convert("RGB")
+    caricature = ImageChops.multiply(base, edge_rgb)
+    caricature = ImageEnhance.Sharpness(caricature).enhance(1.8)
+
+    return caricature
+
+
 # ------------------------------------------------------------
-# Telegram commands
+# Commands
 # ------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -291,9 +290,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/collatz 27 - calculate Collatz sequence\n"
         "/vintage - send a photo and I make it vintage\n"
         "/cartoon - send a photo and I make it cartoon style\n"
+        "/caricature - send a photo and I make it fun caricature style\n"
+        "/caricator - same as /caricature\n"
         "/sticker - send a photo and I make it sticker style\n"
         "/stiker - same as /sticker\n"
         "/beach - send a photo and I make it summer/beach style\n"
+        "/summer - same as /beach\n"
+        "/vacation - same as /beach\n"
         "/cancel - cancel current photo mode\n\n"
         "In a group, commands are the most reliable way to talk to me."
     )
@@ -323,8 +326,9 @@ async def set_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, mod
     messages = {
         "vintage": "Vintage mode selected. Now send me a photo 📸",
         "cartoon": "Cartoon mode selected. Now send me a photo 🎨",
-        "sticker": "Sticker mode selected. Now send me a photo 😄",
-        "beach": "Beach mode selected. Now send me a photo 🌴☀️",
+        "caricature": "Caricature mode selected. Now send me a photo 😄",
+        "sticker": "Sticker mode selected. Now send me a photo 🖼️",
+        "beach": "Beach mode selected. Now send me a photo 🌴",
     }
 
     await update.message.reply_text(messages.get(mode, "Mode selected. Now send me a photo."))
@@ -338,6 +342,10 @@ async def cartoon_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await set_photo_mode(update, context, "cartoon")
 
 
+async def caricature_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await set_photo_mode(update, context, "caricature")
+
+
 async def sticker_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await set_photo_mode(update, context, "sticker")
 
@@ -349,26 +357,24 @@ async def beach_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("photo_mode", None)
     await update.message.reply_text(
-        "Cancelled. Send /vintage, /cartoon, /sticker, /beach, or /collatz 27."
+        "Cancelled. Send /vintage, /cartoon, /caricature, /sticker, /beach, or /collatz 27."
     )
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
-
     if not message or not message.photo:
         return
 
     mode = context.user_data.get("photo_mode")
-
-    # Also support sending a photo with caption:
-    # /vintage, /cartoon, /sticker, /stiker, /beach
     caption_command = normalize_caption_command(message.caption)
 
     if caption_command == "vintage":
         mode = "vintage"
     elif caption_command == "cartoon":
         mode = "cartoon"
+    elif caption_command in ["caricature", "caricator"]:
+        mode = "caricature"
     elif caption_command in ["sticker", "stiker"]:
         mode = "sticker"
     elif caption_command in ["beach", "summer", "vacation"]:
@@ -379,6 +385,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Please choose a photo mode first:\n\n"
             "/vintage\n"
             "/cartoon\n"
+            "/caricature\n"
             "/sticker\n"
             "/beach"
         )
@@ -412,12 +419,20 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 caption="Your cartoon photo is ready 🎨",
             )
 
+        elif mode == "caricature":
+            edited = apply_caricature_filter(img)
+            output = image_to_bytes(edited, "JPEG")
+            await message.reply_photo(
+                photo=InputFile(output),
+                caption="Your caricature photo is ready 😄",
+            )
+
         elif mode == "sticker":
             edited = apply_sticker_filter(img)
             output = image_to_bytes(edited, "PNG")
             await message.reply_document(
                 document=InputFile(output),
-                caption="Your sticker-style image is ready 😄",
+                caption="Your sticker-style image is ready 🖼️",
             )
 
         elif mode == "beach":
@@ -425,23 +440,24 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             output = image_to_bytes(edited, "JPEG")
             await message.reply_photo(
                 photo=InputFile(output),
-                caption="Beach mode activated 🌴☀️",
+                caption="Your beach photo is ready 🌴",
             )
 
         else:
-            await message.reply_text("Unknown mode. Use /vintage, /cartoon, /sticker, or /beach.")
+            await message.reply_text(
+                "Unknown mode. Use /vintage, /cartoon, /caricature, /sticker, or /beach."
+            )
 
     except Exception as error:
         await message.reply_text(f"Sorry, I could not process that photo.\n\nError: {error}")
 
     finally:
-        # Remove mode after one photo.
-        # If you want the mode to stay active for many photos, comment out this line.
+        # Remove mode after one photo
         context.user_data.pop("photo_mode", None)
 
 
 # ------------------------------------------------------------
-# Register Telegram handlers
+# Register handlers
 # ------------------------------------------------------------
 
 telegram_app.add_handler(CommandHandler("start", start))
@@ -449,6 +465,8 @@ telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(CommandHandler("collatz", collatz_command))
 telegram_app.add_handler(CommandHandler("vintage", vintage_command))
 telegram_app.add_handler(CommandHandler("cartoon", cartoon_command))
+telegram_app.add_handler(CommandHandler("caricature", caricature_command))
+telegram_app.add_handler(CommandHandler("caricator", caricature_command))
 telegram_app.add_handler(CommandHandler("sticker", sticker_command))
 telegram_app.add_handler(CommandHandler("stiker", sticker_command))
 telegram_app.add_handler(CommandHandler("beach", beach_command))
@@ -490,6 +508,7 @@ async def root():
             "/collatz 27",
             "/vintage",
             "/cartoon",
+            "/caricature",
             "/sticker",
             "/beach",
         ],
@@ -498,7 +517,6 @@ async def root():
 
 @api.head("/")
 async def head_root():
-    # Prevents harmless Render/monitoring HEAD requests from showing 405 in logs.
     return {}
 
 
