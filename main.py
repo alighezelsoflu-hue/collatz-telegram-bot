@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+from deep_translator import GoogleTranslator
 from io import BytesIO
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
@@ -1176,11 +1177,21 @@ def summarize_news_entry(entry) -> str:
 
     return headline, source, short_summary
 
+def translate_to_farsi(text: str) -> str:
+    if not text:
+        return ""
+
+    try:
+        # Keep text shorter to avoid translation issues.
+        text = text[:450]
+        return GoogleTranslator(source="auto", target="fa").translate(text)
+    except Exception:
+        return "ترجمه در دسترس نیست."
+    
 
 async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        # You can adjust this query later.
-        query = quote_plus('Trump latest news OR post OR tweet')
+        query = quote_plus("Trump latest news OR post OR tweet")
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
         feed = feedparser.parse(rss_url)
@@ -1200,11 +1211,12 @@ async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reverse=True,
         )
 
-        entries = entries[:7]
+        entries = entries[:5]
 
         lines = [
             "Latest Trump-related news summary",
             "Sorted chronologically, newest first",
+            "English + Farsi translation",
             "Source: Google News RSS",
             "",
         ]
@@ -1213,10 +1225,19 @@ async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             headline, source, short_summary = summarize_news_entry(entry)
             published = clean_rss_text(getattr(entry, "published", "time unavailable"))
 
+            headline_fa = translate_to_farsi(headline)
+            summary_fa = translate_to_farsi(short_summary)
+
             lines.append(f"{index}. {headline}")
             lines.append(f"Source: {source}")
             lines.append(f"Published: {published}")
             lines.append(f"Summary: {short_summary}")
+            lines.append("")
+            lines.append("ترجمه فارسی:")
+            lines.append(f"عنوان: {headline_fa}")
+            lines.append(f"خلاصه: {summary_fa}")
+            lines.append("")
+            lines.append("-" * 40)
             lines.append("")
 
         text = "\n".join(lines)
