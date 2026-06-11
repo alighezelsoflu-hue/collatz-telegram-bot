@@ -18,7 +18,7 @@ MAX_INPUT = 10**12
 TELEGRAM_MESSAGE_LIMIT = 3500
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-app-name.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  
 SECRET_PATH = os.getenv("SECRET_PATH", "telegram-webhook")
 
 if not TOKEN:
@@ -49,12 +49,10 @@ def collatz_sequence(n: int) -> List[int]:
     return seq
 
 
-def build_collatz_messages(n: int, message_limit: int = TELEGRAM_MESSAGE_LIMIT) -> List[str]:
+def build_collatz_text_report(n: int) -> str:
     """
-    Build one or more Telegram messages for the full Collatz sequence.
-
-    Telegram messages have a length limit, so long sequences are split
-    into multiple messages instead of being shortened with "...".
+    Build a full Collatz report as plain text.
+    This will be sent to the user as a .txt file.
     """
     if n > MAX_INPUT:
         raise ValueError(f"Please use a number up to {MAX_INPUT:,}.")
@@ -65,34 +63,85 @@ def build_collatz_messages(n: int, message_limit: int = TELEGRAM_MESSAGE_LIMIT) 
     max_value = max(seq)
     peak_index = seq.index(max_value)
 
-    messages = [
-        (
-            f"Collatz result for n = {n}\n\n"
-            f"Steps to reach 1: {steps}\n"
-            f"Maximum value reached: {max_value}\n"
-            f"Peak reached at step: {peak_index}\n"
-            f"Sequence length: {len(seq)} numbers"
-        )
+    lines = [
+        f"Collatz report for n = {n}",
+        "",
+        f"Steps to reach 1: {steps}",
+        f"Maximum value reached: {max_value}",
+        f"Peak reached at step: {peak_index}",
+        f"Sequence length: {len(seq)} numbers",
+        "",
+        "Full step-by-step sequence:",
+        "",
     ]
 
-    current_message = "Full sequence:\n"
+    for index in range(len(seq) - 1):
+        current_value = seq[index]
+        next_value = seq[index + 1]
 
-    for index, value in enumerate(seq):
-        if index == 0:
-            piece = str(value)
+        if current_value % 2 == 0:
+            rule = f"{current_value} is even, so {current_value} / 2 = {next_value}"
         else:
-            piece = f" → {value}"
+            rule = f"{current_value} is odd, so 3 * {current_value} + 1 = {next_value}"
 
-        if len(current_message) + len(piece) > message_limit:
-            messages.append(current_message)
-            current_message = f"Sequence continued:\n{value}"
-        else:
-            current_message += piece
+        lines.append(f"Step {index + 1}: {rule}")
 
-    if current_message.strip():
-        messages.append(current_message)
+    lines.extend(
+        [
+            "",
+            f"Final result: reached 1 after {steps} steps.",
+            "",
+            "Raw sequence:",
+            " -> ".join(map(str, seq)),
+        ]
+    )
 
-    return messages
+    return "\n".join(lines)
+
+
+def text_to_file(text: str, filename: str) -> BytesIO:
+    """
+    Convert text into a file-like object Telegram can send.
+    """
+    output = BytesIO()
+    output.write(text.encode("utf-8"))
+    output.seek(0)
+    output.name = filename
+    return output
+
+
+async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /collatz 27")
+        return
+
+    try:
+        n = int(context.args[0])
+
+        seq = collatz_sequence(n)
+        steps = len(seq) - 1
+        max_value = max(seq)
+
+        report_text = build_collatz_text_report(n)
+        file_output = text_to_file(report_text, f"collatz_{n}_steps.txt")
+
+        await update.message.reply_text(
+            f"Collatz result for n = {n}\n\n"
+            f"Steps to reach 1: {steps}\n"
+            f"Maximum value reached: {max_value}\n\n"
+            f"I attached the full step-by-step sequence as a text file."
+        )
+
+        await update.message.reply_document(
+            document=InputFile(file_output),
+            filename=f"collatz_{n}_steps.txt",
+            caption=f"Full Collatz steps for n = {n}",
+        )
+
+    except ValueError as error:
+        await update.message.reply_text(
+            f"{error}\n\nPlease send a positive whole number, for example:\n/collatz 27"
+        )
 
 
 # ------------------------------------------------------------
