@@ -1,4 +1,5 @@
 import os
+import re
 from io import BytesIO
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
@@ -27,8 +28,9 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 SECRET_PATH = os.getenv("SECRET_PATH", "telegram-webhook")
 
-# Use FOOTBALL_DATA_TOKEN in Render.
-# FOOTBALL_API_KEY fallback is only here in case you already named it that.
+# football-data.org token.
+# Add this in Render:
+# FOOTBALL_DATA_TOKEN = your_token_here
 FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN") or os.getenv("FOOTBALL_API_KEY")
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 
@@ -251,10 +253,13 @@ def format_match_item(match: Dict[str, Any], index: int) -> str:
     time_text = format_dual_time(utc_date)
 
     extra_parts = []
+
     if group:
         extra_parts.append(str(group).replace("_", " ").title())
+
     if matchday:
         extra_parts.append(f"Matchday {matchday}")
+
     if stage:
         extra_parts.append(str(stage).replace("_", " ").title())
 
@@ -316,12 +321,43 @@ async def get_world_cup_standings() -> List[Dict[str, Any]]:
     return data.get("standings", [])
 
 
+def extract_group_label(standing: Dict[str, Any]) -> str:
+    raw_group = standing.get("group")
+    raw_type = standing.get("type")
+
+    value = raw_group or raw_type or "Unknown Group"
+    return str(value).strip()
+
+
+def extract_group_letter(standing: Dict[str, Any]) -> Optional[str]:
+    label = extract_group_label(standing).upper().strip()
+
+    match = re.search(r"GROUP[\s_-]*([A-Z])", label)
+    if match:
+        return match.group(1)
+
+    if re.fullmatch(r"[A-Z]", label):
+        return label
+
+    return None
+
+
 def format_standing_table(standing: Dict[str, Any]) -> str:
-    group_name = standing.get("group") or standing.get("type") or "Standings"
-    group_title = str(group_name).replace("_", " ").title()
+    group_label = extract_group_label(standing)
+    group_letter = extract_group_letter(standing)
+
+    if group_letter:
+        group_title = f"Group {group_letter}"
+    else:
+        group_title = str(group_label).replace("_", " ").title()
 
     table = standing.get("table", [])
-    lines = [group_title]
+
+    lines = [
+        group_title,
+        f"Raw API group label: {group_label}",
+        "",
+    ]
 
     if not table:
         lines.append("No table data available.")
@@ -341,30 +377,33 @@ def format_standing_table(standing: Dict[str, Any]) -> str:
 
         lines.append(
             f"{position}. {team_name} — {points} pts "
-            f"(P{played}, W{won}, D{draw}, L{lost}, GF{goals_for}, GA{goals_against}, GD{goal_difference})"
+            f"(P{played}, W{won}, D{draw}, L{lost}, "
+            f"GF{goals_for}, GA{goals_against}, GD{goal_difference})"
         )
 
     return "\n".join(lines)
 
 
 def group_matches_requested_group(standing: Dict[str, Any], requested_group: str) -> bool:
-    group_name = str(standing.get("group") or "").upper()
     requested = requested_group.strip().upper()
+    requested = requested.replace("GROUP", "").replace("_", "").replace("-", "").strip()
 
-    possible_names = {
+    standing_letter = extract_group_letter(standing)
+
+    if standing_letter and standing_letter == requested:
+        return True
+
+    label = extract_group_label(standing).upper()
+    normalized = label.replace("_", " ").replace("-", " ")
+
+    possible_labels = [
         requested,
-        f"GROUP_{requested}",
         f"GROUP {requested}",
-    }
+        f"GROUP_{requested}",
+        f"GROUP-{requested}",
+    ]
 
-    normalized = group_name.replace("-", "_").replace(" ", "_")
-
-    return (
-        group_name in possible_names
-        or normalized in possible_names
-        or normalized.endswith(f"GROUP_{requested}")
-        or group_name.endswith(f"GROUP {requested}")
-    )
+    return any(possible in label or possible in normalized for possible in possible_labels)
 
 
 # ------------------------------------------------------------
@@ -570,8 +609,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/wc_today - today's matches in EU and Iran time\n"
         "/wc_tomorrow - tomorrow's matches in EU and Iran time\n"
         "/wc_live - live World Cup matches\n"
-        "/wc_group A - Group A standings\n"
-        "/wc_standings - all group standings\n\n"
+        "/wc_group A - Group A standings as a text file\n"
+        "/wc_standings - all group standings as a text file\n\n"
         "/cancel - cancel current photo mode\n\n"
         "In a group, commands are the most reliable way to talk to me."
     )
@@ -707,35 +746,61 @@ async def wc_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     requested_group = context.args[0].strip().upper()
+    requested_group = requested_group.replace("GROUP", "").replace("_", "").replace("-", "").strip()
 
     try:
         standings = await get_world_cup_standings()
 
         if not standings:
-            await update.message.reply_text("No World Cup standings found yet.")
-            return
-
-        match = None
-
-        for standing in standings:
-            if group_matches_requested_group(standing, requested_group):
-                match = standing
-                break
-
-        if not match:
             await update.message.reply_text(
-                f"Could not find Group {requested_group}.\n"
-                f"Try /wc_standings"
+                "No World Cup standings found yet.\n\n"
+                "This may happen if football-data.org has not published World Cup 2026 group tables yet."
             )
             return
 
-        text = format_standing_table(match)
+        matching_standing = None
+
+        for standing in standings:
+            if group_matches_requested_group(standing, requested_group):
+                matching_standing = standing
+                break
+
+        if not matching_standing:
+            available_groups = []
+
+            for standing in standings:
+                label = extract_group_label(standing)
+                letter = extract_group_letter(standing)
+
+                if letter:
+                    available_groups.append(f"Group {letter} — raw label: {label}")
+                else:
+                    available_groups.append(f"Unknown group — raw label: {label}")
+
+            debug_text = "\n".join(available_groups) if available_groups else "No group labels returned."
+
+            filename = "world_cup_available_groups_debug.txt"
+            file_output = text_to_file(debug_text, filename)
+
+            await update.message.reply_text(
+                f"Could not find Group {requested_group}.\n\n"
+                "I attached a debug file showing the group labels returned by football-data.org."
+            )
+
+            await update.message.reply_document(
+                document=InputFile(file_output, filename=filename),
+                caption="Available World Cup group labels from API",
+            )
+            return
+
+        text = format_standing_table(matching_standing)
+
         filename = f"world_cup_group_{requested_group}_standings.txt"
         file_output = text_to_file(text, filename)
 
         await update.message.reply_text(
             f"World Cup Group {requested_group} standings are ready.\n"
-            f"I attached them as a text file."
+            "I attached them as a text file."
         )
 
         await update.message.reply_document(
