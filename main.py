@@ -1,5 +1,7 @@
 import os
 import re
+import html
+import time
 from io import BytesIO
 from typing import List, Optional, Tuple, Dict, Any
 from datetime import datetime, timedelta
@@ -1141,34 +1143,80 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"Could not load World Cup standings.\n\nError: {error}")
 
 
+def clean_rss_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = html.unescape(text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def summarize_news_entry(entry) -> str:
+    title = clean_rss_text(getattr(entry, "title", ""))
+    summary = clean_rss_text(getattr(entry, "summary", ""))
+
+    # Google News RSS often includes the source name inside the title.
+    # Example: "Trump says ... - CNN"
+    if " - " in title:
+        headline, source = title.rsplit(" - ", 1)
+    else:
+        headline, source = title, "Unknown source"
+
+    if summary and summary != title:
+        short_summary = summary
+    else:
+        short_summary = headline
+
+    # Keep summary short for Telegram.
+    if len(short_summary) > 350:
+        short_summary = short_summary[:347] + "..."
+
+    return headline, source, short_summary
+
+
 async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        query = quote_plus('Trump latest post OR tweet site:x.com/realDonaldTrump')
+        # You can adjust this query later.
+        query = quote_plus('Trump latest news OR post OR tweet')
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
 
         feed = feedparser.parse(rss_url)
-        entries = feed.entries[:5]
+        entries = list(feed.entries)
 
         if not entries:
             await update.message.reply_text(
-                "I could not find recent Trump/X-related news right now."
+                "I could not find recent Trump-related news right now."
             )
             return
 
+        # Sort chronologically: newest first.
+        entries.sort(
+            key=lambda entry: time.mktime(entry.published_parsed)
+            if hasattr(entry, "published_parsed") and entry.published_parsed
+            else 0,
+            reverse=True,
+        )
+
+        entries = entries[:7]
+
         lines = [
-            "Latest Trump/X-related news",
+            "Latest Trump-related news summary",
+            "Sorted chronologically, newest first",
             "Source: Google News RSS",
             "",
         ]
 
         for index, entry in enumerate(entries, start=1):
-            title = getattr(entry, "title", "No title")
-            link = getattr(entry, "link", "")
-            published = getattr(entry, "published", "time unavailable")
+            headline, source, short_summary = summarize_news_entry(entry)
+            published = clean_rss_text(getattr(entry, "published", "time unavailable"))
 
-            lines.append(f"{index}. {title}")
+            lines.append(f"{index}. {headline}")
+            lines.append(f"Source: {source}")
             lines.append(f"Published: {published}")
-            lines.append(link)
+            lines.append(f"Summary: {short_summary}")
             lines.append("")
 
         text = "\n".join(lines)
@@ -1178,9 +1226,8 @@ async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     except Exception as error:
         await update.message.reply_text(
-            f"Could not load Trump-related news.\n\nError: {error}"
+            f"Could not load Trump-related news summary.\n\nError: {error}"
         )
-
 
 async def set_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
     context.user_data["photo_mode"] = mode
