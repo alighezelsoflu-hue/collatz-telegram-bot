@@ -43,7 +43,7 @@ or:
 Your earlier error:
 
 ```text
-certificate verify failed: Hostname mismatch, certificate is not valid for 'api.telegram.org'
+certificate verify failed: Hostname mismatch, certificate is not valid for 'api.telegram.org' 8889783978:AAGd8-anLZsug69V27al3gzQfEwohSfSVok
 ```
 
 means Python is not seeing Telegram's real certificate.
