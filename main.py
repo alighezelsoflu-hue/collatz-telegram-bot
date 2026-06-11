@@ -24,10 +24,12 @@ from telegram.ext import (
 MAX_INPUT = 10**12
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Example: https://your-app-name.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 SECRET_PATH = os.getenv("SECRET_PATH", "telegram-webhook")
 
-FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN")
+# Use FOOTBALL_DATA_TOKEN in Render.
+# FOOTBALL_API_KEY fallback is only here in case you already named it that.
+FOOTBALL_DATA_TOKEN = os.getenv("FOOTBALL_DATA_TOKEN") or os.getenv("FOOTBALL_API_KEY")
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 
 WORLD_CUP_COMPETITION = os.getenv("WORLD_CUP_COMPETITION", "WC")
@@ -44,13 +46,10 @@ api = FastAPI(title="Collatz Multi Tool Telegram Bot")
 
 
 # ------------------------------------------------------------
-# General helper functions
+# General helpers
 # ------------------------------------------------------------
 
 def split_long_text(text: str, limit: int = 3500) -> List[str]:
-    """
-    Telegram messages have a max size, so split long replies safely.
-    """
     if len(text) <= limit:
         return [text]
 
@@ -68,6 +67,14 @@ def split_long_text(text: str, limit: int = 3500) -> List[str]:
         chunks.append(current)
 
     return chunks
+
+
+def text_to_file(text: str, filename: str) -> BytesIO:
+    output = BytesIO()
+    output.write(text.encode("utf-8"))
+    output.seek(0)
+    output.name = filename
+    return output
 
 
 # ------------------------------------------------------------
@@ -92,12 +99,6 @@ def collatz_sequence(n: int) -> List[int]:
 
 
 def build_collatz_text_report(n: int) -> Tuple[str, int, int, int, int]:
-    """
-    Build a full Collatz report as plain text.
-
-    Returns:
-    report_text, steps, max_value, peak_index, sequence_length
-    """
     if n > MAX_INPUT:
         raise ValueError(f"Please use a number up to {MAX_INPUT:,}.")
 
@@ -143,23 +144,14 @@ def build_collatz_text_report(n: int) -> Tuple[str, int, int, int, int]:
     )
 
     report_text = "\n".join(lines)
-
     return report_text, steps, max_value, peak_index, sequence_length
 
 
-def text_to_file(text: str, filename: str) -> BytesIO:
-    output = BytesIO()
-    output.write(text.encode("utf-8"))
-    output.seek(0)
-    output.name = filename
-    return output
-
-
 # ------------------------------------------------------------
-# World Cup 2026 logic
+# football-data.org World Cup logic
 # ------------------------------------------------------------
 
-async def football_data_get(endpoint: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+async def football_data_get(endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not FOOTBALL_DATA_TOKEN:
         raise ValueError(
             "Missing FOOTBALL_DATA_TOKEN environment variable in Render. "
@@ -172,25 +164,32 @@ async def football_data_get(endpoint: str, params: Dict[str, Any] | None = None)
 
     url = f"{FOOTBALL_DATA_BASE_URL}/{endpoint.lstrip('/')}"
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=25.0) as client:
         response = await client.get(url, headers=headers, params=params or {})
-        response.raise_for_status()
-        return response.json()
+
+    if response.status_code >= 400:
+        try:
+            details = response.json()
+        except Exception:
+            details = response.text
+
+        raise ValueError(
+            f"football-data.org API error {response.status_code}: {details}"
+        )
+
+    return response.json()
 
 
-def parse_api_datetime(api_datetime: str) -> datetime:
-    """
-    Parse API-Football fixture datetime.
-    """
-    cleaned = api_datetime.replace("Z", "+00:00")
+def parse_football_data_datetime(utc_date: str) -> datetime:
+    cleaned = utc_date.replace("Z", "+00:00")
     return datetime.fromisoformat(cleaned)
 
 
-def format_dual_time(api_datetime: str) -> str:
-    """
-    Show both Central Europe time and Iran time.
-    """
-    dt = parse_api_datetime(api_datetime)
+def format_dual_time(utc_date: Optional[str]) -> str:
+    if not utc_date:
+        return "EU: time unavailable\nIran: time unavailable"
+
+    dt = parse_football_data_datetime(utc_date)
 
     eu_dt = dt.astimezone(ZoneInfo(EU_TIMEZONE))
     iran_dt = dt.astimezone(ZoneInfo(IRAN_TIMEZONE))
@@ -201,140 +200,175 @@ def format_dual_time(api_datetime: str) -> str:
     return f"EU: {eu_text}\nIran: {iran_text}"
 
 
-def get_fixture_score_text(fixture_item: Dict[str, Any]) -> str:
-    teams = fixture_item.get("teams", {})
-    goals = fixture_item.get("goals", {})
+def format_match_score(match: Dict[str, Any]) -> str:
+    home_team = match.get("homeTeam", {}).get("name") or "Home"
+    away_team = match.get("awayTeam", {}).get("name") or "Away"
 
-    home = teams.get("home", {}).get("name", "Home")
-    away = teams.get("away", {}).get("name", "Away")
+    score = match.get("score", {}) or {}
+    full_time = score.get("fullTime", {}) or {}
+    half_time = score.get("halfTime", {}) or {}
 
-    home_goals = goals.get("home")
-    away_goals = goals.get("away")
+    home_score = full_time.get("home")
+    away_score = full_time.get("away")
 
-    if home_goals is None or away_goals is None:
-        return f"{home} vs {away}"
+    if home_score is None or away_score is None:
+        home_score = half_time.get("home")
+        away_score = half_time.get("away")
 
-    return f"{home} {home_goals} - {away_goals} {away}"
+    if home_score is None or away_score is None:
+        return f"{home_team} vs {away_team}"
 
-
-def get_fixture_status_text(fixture_item: Dict[str, Any]) -> str:
-    fixture = fixture_item.get("fixture", {})
-    status = fixture.get("status", {})
-
-    long_status = status.get("long") or "Unknown"
-    short_status = status.get("short") or ""
-    elapsed = status.get("elapsed")
-
-    if elapsed is not None and short_status not in ["FT", "AET", "PEN"]:
-        return f"{long_status} - {elapsed}'"
-
-    return long_status
+    return f"{home_team} {home_score} - {away_score} {away_team}"
 
 
-def format_fixture_item(fixture_item: Dict[str, Any], index: int) -> str:
-    fixture = fixture_item.get("fixture", {})
-    league = fixture_item.get("league", {})
+def format_match_status(match: Dict[str, Any]) -> str:
+    status = match.get("status", "UNKNOWN")
 
-    score_text = get_fixture_score_text(fixture_item)
-    status_text = get_fixture_status_text(fixture_item)
+    status_names = {
+        "SCHEDULED": "Scheduled",
+        "TIMED": "Scheduled",
+        "IN_PLAY": "Live",
+        "PAUSED": "Half-time / paused",
+        "FINISHED": "Finished",
+        "SUSPENDED": "Suspended",
+        "POSTPONED": "Postponed",
+        "CANCELLED": "Cancelled",
+        "AWARDED": "Awarded",
+    }
 
-    venue = fixture.get("venue", {}) or {}
-    venue_name = venue.get("name") or "Unknown stadium"
-    city = venue.get("city") or "Unknown city"
+    return status_names.get(status, status)
 
-    round_name = league.get("round") or "World Cup"
 
-    fixture_date = fixture.get("date")
-    if fixture_date:
-        time_text = format_dual_time(fixture_date)
-    else:
-        time_text = "Time unavailable"
+def format_match_item(match: Dict[str, Any], index: int) -> str:
+    score_text = format_match_score(match)
+    status_text = format_match_status(match)
+
+    stage = match.get("stage") or "World Cup"
+    group = match.get("group") or ""
+    matchday = match.get("matchday")
+
+    utc_date = match.get("utcDate")
+    time_text = format_dual_time(utc_date)
+
+    extra_parts = []
+    if group:
+        extra_parts.append(str(group).replace("_", " ").title())
+    if matchday:
+        extra_parts.append(f"Matchday {matchday}")
+    if stage:
+        extra_parts.append(str(stage).replace("_", " ").title())
+
+    extra = " | ".join(extra_parts) if extra_parts else "World Cup"
 
     return (
         f"{index}. {score_text}\n"
         f"Status: {status_text}\n"
-        f"Round: {round_name}\n"
-        f"{time_text}\n"
-        f"Venue: {venue_name}, {city}"
+        f"Round: {extra}\n"
+        f"{time_text}"
     )
 
 
-async def get_world_cup_fixtures_by_date(date_text: str) -> List[Dict[str, Any]]:
+async def get_world_cup_matches_by_date(date_text: str) -> List[Dict[str, Any]]:
+    endpoint = f"competitions/{WORLD_CUP_COMPETITION}/matches"
+
     params = {
-        "league": WORLD_CUP_LEAGUE_ID,
-        "season": WORLD_CUP_SEASON,
-        "date": date_text,
-        "timezone": EU_TIMEZONE,
-    }
-
-    data = await api_football_get("fixtures", params)
-    return data.get("response", [])
-
-
-async def get_world_cup_live_fixtures() -> List[Dict[str, Any]]:
-    params = {
-        "live": "all",
-        "timezone": EU_TIMEZONE,
-    }
-
-    data = await api_football_get("fixtures", params)
-    fixtures = data.get("response", [])
-
-    # Keep only World Cup fixtures.
-    return [
-        item for item in fixtures
-        if item.get("league", {}).get("id") == WORLD_CUP_LEAGUE_ID
-    ]
-
-
-async def get_world_cup_standings() -> List[List[Dict[str, Any]]]:
-    params = {
-        "league": WORLD_CUP_LEAGUE_ID,
+        "dateFrom": date_text,
+        "dateTo": date_text,
         "season": WORLD_CUP_SEASON,
     }
 
-    data = await api_football_get("standings", params)
-    response = data.get("response", [])
-
-    if not response:
-        return []
-
-    league_data = response[0].get("league", {})
-    standings = league_data.get("standings", [])
-
-    return standings
+    data = await football_data_get(endpoint, params)
+    return data.get("matches", [])
 
 
-def format_standings_group(group_rows: List[Dict[str, Any]]) -> str:
-    if not group_rows:
-        return "No standings available."
+async def get_world_cup_matches_range(date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    endpoint = f"competitions/{WORLD_CUP_COMPETITION}/matches"
 
-    group_name = group_rows[0].get("group", "Group")
+    params = {
+        "dateFrom": date_from,
+        "dateTo": date_to,
+        "season": WORLD_CUP_SEASON,
+    }
 
-    lines = [f"{group_name}"]
+    data = await football_data_get(endpoint, params)
+    return data.get("matches", [])
 
-    for row in group_rows:
-        rank = row.get("rank", "-")
+
+async def get_world_cup_live_matches() -> List[Dict[str, Any]]:
+    today = datetime.now(ZoneInfo(EU_TIMEZONE)).date()
+    date_from = (today - timedelta(days=1)).isoformat()
+    date_to = (today + timedelta(days=1)).isoformat()
+
+    matches = await get_world_cup_matches_range(date_from, date_to)
+
+    live_statuses = {"IN_PLAY", "PAUSED"}
+    return [match for match in matches if match.get("status") in live_statuses]
+
+
+async def get_world_cup_standings() -> List[Dict[str, Any]]:
+    endpoint = f"competitions/{WORLD_CUP_COMPETITION}/standings"
+
+    params = {
+        "season": WORLD_CUP_SEASON,
+    }
+
+    data = await football_data_get(endpoint, params)
+    return data.get("standings", [])
+
+
+def format_standing_table(standing: Dict[str, Any]) -> str:
+    group_name = standing.get("group") or standing.get("type") or "Standings"
+    group_title = str(group_name).replace("_", " ").title()
+
+    table = standing.get("table", [])
+    lines = [group_title]
+
+    if not table:
+        lines.append("No table data available.")
+        return "\n".join(lines)
+
+    for row in table:
+        position = row.get("position", "-")
         team_name = row.get("team", {}).get("name", "Unknown team")
+        played = row.get("playedGames", 0)
+        won = row.get("won", 0)
+        draw = row.get("draw", 0)
+        lost = row.get("lost", 0)
         points = row.get("points", 0)
-        played = row.get("all", {}).get("played", 0)
-        win = row.get("all", {}).get("win", 0)
-        draw = row.get("all", {}).get("draw", 0)
-        lose = row.get("all", {}).get("lose", 0)
-        goals_for = row.get("all", {}).get("goals", {}).get("for", 0)
-        goals_against = row.get("all", {}).get("goals", {}).get("against", 0)
-        goal_diff = row.get("goalsDiff", 0)
+        goals_for = row.get("goalsFor", 0)
+        goals_against = row.get("goalsAgainst", 0)
+        goal_difference = row.get("goalDifference", 0)
 
         lines.append(
-            f"{rank}. {team_name} — {points} pts "
-            f"(P{played}, W{win}, D{draw}, L{lose}, GF{goals_for}, GA{goals_against}, GD{goal_diff})"
+            f"{position}. {team_name} — {points} pts "
+            f"(P{played}, W{won}, D{draw}, L{lost}, GF{goals_for}, GA{goals_against}, GD{goal_difference})"
         )
 
     return "\n".join(lines)
 
 
+def group_matches_requested_group(standing: Dict[str, Any], requested_group: str) -> bool:
+    group_name = str(standing.get("group") or "").upper()
+    requested = requested_group.strip().upper()
+
+    possible_names = {
+        requested,
+        f"GROUP_{requested}",
+        f"GROUP {requested}",
+    }
+
+    normalized = group_name.replace("-", "_").replace(" ", "_")
+
+    return (
+        group_name in possible_names
+        or normalized in possible_names
+        or normalized.endswith(f"GROUP_{requested}")
+        or group_name.endswith(f"GROUP {requested}")
+    )
+
+
 # ------------------------------------------------------------
-# Image helper functions
+# Image helpers
 # ------------------------------------------------------------
 
 def resize_for_telegram(img: Image.Image, max_size: int = 1400) -> Image.Image:
@@ -363,14 +397,6 @@ def image_to_bytes(img: Image.Image, image_format: str = "JPEG") -> BytesIO:
 
 
 def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
-    """
-    Converts:
-    /vintage
-    /vintage@MyBot
-
-    into:
-    vintage
-    """
     if not caption:
         return None
 
@@ -440,7 +466,6 @@ def apply_cartoon_filter(img: Image.Image) -> Image.Image:
     edges = gray.filter(ImageFilter.FIND_EDGES)
     edges = ImageOps.autocontrast(edges)
     edges = ImageOps.invert(edges)
-
     edges = edges.point(lambda p: 255 if p > 80 else 0)
 
     cartoon = ImageChops.multiply(base, edges.convert("RGB"))
@@ -507,13 +532,6 @@ def apply_sticker_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_beach_filter(img: Image.Image) -> Image.Image:
-    """
-    Summer / beach style as a clean photo filter only.
-
-    No sunglasses.
-    No stickers.
-    No clothing/body changes.
-    """
     img = img.convert("RGB")
     img = resize_for_telegram(img)
 
@@ -586,8 +604,7 @@ async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
         await update.message.reply_document(
-            document=file_output,
-            filename=filename,
+            document=InputFile(file_output, filename=filename),
             caption=f"Full Collatz steps for n = {n}",
         )
 
@@ -600,9 +617,9 @@ async def collatz_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def wc_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         today = datetime.now(ZoneInfo(EU_TIMEZONE)).date().isoformat()
-        fixtures = await get_world_cup_fixtures_by_date(today)
+        matches = await get_world_cup_matches_by_date(today)
 
-        if not fixtures:
+        if not matches:
             await update.message.reply_text(
                 f"No World Cup matches found for today.\n"
                 f"Date checked: {today}\n"
@@ -611,19 +628,17 @@ async def wc_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         lines = [
-            f"World Cup 2026 matches today",
+            "World Cup 2026 matches today",
             f"Date: {today}",
-            f"Times shown in Central Europe and Iran time",
+            "Times shown in Central Europe and Iran time",
             "",
         ]
 
-        for index, item in enumerate(fixtures, start=1):
-            lines.append(format_fixture_item(item, index))
+        for index, match in enumerate(matches, start=1):
+            lines.append(format_match_item(match, index))
             lines.append("")
 
-        text = "\n".join(lines)
-
-        for chunk in split_long_text(text):
+        for chunk in split_long_text("\n".join(lines)):
             await update.message.reply_text(chunk)
 
     except Exception as error:
@@ -633,9 +648,9 @@ async def wc_today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def wc_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         tomorrow = (datetime.now(ZoneInfo(EU_TIMEZONE)).date() + timedelta(days=1)).isoformat()
-        fixtures = await get_world_cup_fixtures_by_date(tomorrow)
+        matches = await get_world_cup_matches_by_date(tomorrow)
 
-        if not fixtures:
+        if not matches:
             await update.message.reply_text(
                 f"No World Cup matches found for tomorrow.\n"
                 f"Date checked: {tomorrow}\n"
@@ -644,19 +659,17 @@ async def wc_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
         lines = [
-            f"World Cup 2026 matches tomorrow",
+            "World Cup 2026 matches tomorrow",
             f"Date: {tomorrow}",
-            f"Times shown in Central Europe and Iran time",
+            "Times shown in Central Europe and Iran time",
             "",
         ]
 
-        for index, item in enumerate(fixtures, start=1):
-            lines.append(format_fixture_item(item, index))
+        for index, match in enumerate(matches, start=1):
+            lines.append(format_match_item(match, index))
             lines.append("")
 
-        text = "\n".join(lines)
-
-        for chunk in split_long_text(text):
+        for chunk in split_long_text("\n".join(lines)):
             await update.message.reply_text(chunk)
 
     except Exception as error:
@@ -665,9 +678,9 @@ async def wc_tomorrow_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def wc_live_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        fixtures = await get_world_cup_live_fixtures()
+        matches = await get_world_cup_live_matches()
 
-        if not fixtures:
+        if not matches:
             await update.message.reply_text("No live World Cup matches right now.")
             return
 
@@ -677,13 +690,11 @@ async def wc_live_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "",
         ]
 
-        for index, item in enumerate(fixtures, start=1):
-            lines.append(format_fixture_item(item, index))
+        for index, match in enumerate(matches, start=1):
+            lines.append(format_match_item(match, index))
             lines.append("")
 
-        text = "\n".join(lines)
-
-        for chunk in split_long_text(text):
+        for chunk in split_long_text("\n".join(lines)):
             await update.message.reply_text(chunk)
 
     except Exception as error:
@@ -704,31 +715,21 @@ async def wc_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("No World Cup standings found yet.")
             return
 
-        matching_group = None
+        match = None
 
-        for group_rows in standings:
-            if not group_rows:
-                continue
-
-            group_name = group_rows[0].get("group", "")
-            normalized = group_name.upper()
-
-            if normalized.endswith(f"GROUP {requested_group}") or normalized.endswith(f"GROUP {requested_group.upper()}"):
-                matching_group = group_rows
+        for standing in standings:
+            if group_matches_requested_group(standing, requested_group):
+                match = standing
                 break
 
-            if f"GROUP {requested_group}" in normalized:
-                matching_group = group_rows
-                break
-
-        if not matching_group:
+        if not match:
             await update.message.reply_text(
                 f"Could not find Group {requested_group}.\n"
-                f"Try: /wc_standings"
+                f"Try /wc_standings"
             )
             return
 
-        await update.message.reply_text(format_standings_group(matching_group))
+        await update.message.reply_text(format_standing_table(match))
 
     except Exception as error:
         await update.message.reply_text(f"Could not load World Cup standings.\n\nError: {error}")
@@ -744,13 +745,11 @@ async def wc_standings_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
         lines = ["World Cup 2026 group standings", ""]
 
-        for group_rows in standings:
-            lines.append(format_standings_group(group_rows))
+        for standing in standings:
+            lines.append(format_standing_table(standing))
             lines.append("")
 
-        text = "\n".join(lines)
-
-        for chunk in split_long_text(text):
+        for chunk in split_long_text("\n".join(lines)):
             await update.message.reply_text(chunk)
 
     except Exception as error:
@@ -846,7 +845,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edited = apply_vintage_filter(img)
             output = image_to_bytes(edited, "JPEG")
             await message.reply_photo(
-                photo=InputFile(output),
+                photo=InputFile(output, filename="vintage.jpg"),
                 caption="Your vintage photo is ready 📸",
             )
 
@@ -854,7 +853,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edited = apply_cartoon_filter(img)
             output = image_to_bytes(edited, "JPEG")
             await message.reply_photo(
-                photo=InputFile(output),
+                photo=InputFile(output, filename="cartoon.jpg"),
                 caption="Your cartoon photo is ready 🎨",
             )
 
@@ -862,7 +861,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edited = apply_caricature_filter(img)
             output = image_to_bytes(edited, "JPEG")
             await message.reply_photo(
-                photo=InputFile(output),
+                photo=InputFile(output, filename="caricature.jpg"),
                 caption="Your caricature photo is ready 😄",
             )
 
@@ -870,7 +869,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edited = apply_sticker_filter(img)
             output = image_to_bytes(edited, "PNG")
             await message.reply_document(
-                document=InputFile(output),
+                document=InputFile(output, filename="sticker_style.png"),
                 caption="Your sticker-style image is ready 🖼️",
             )
 
@@ -878,7 +877,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edited = apply_beach_filter(img)
             output = image_to_bytes(edited, "JPEG")
             await message.reply_photo(
-                photo=InputFile(output),
+                photo=InputFile(output, filename="beach.jpg"),
                 caption="Your beach photo is ready 🌴",
             )
 
@@ -963,6 +962,9 @@ async def root():
             "/sticker",
             "/beach",
         ],
+        "football_provider": "football-data.org",
+        "world_cup_competition": WORLD_CUP_COMPETITION,
+        "world_cup_season": WORLD_CUP_SEASON,
         "timezones": {
             "central_europe": EU_TIMEZONE,
             "iran": IRAN_TIMEZONE,
