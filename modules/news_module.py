@@ -1,7 +1,7 @@
 import html
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 from urllib.parse import quote_plus
 
 import feedparser
@@ -49,7 +49,7 @@ def clean_article_text(text: str) -> str:
     return text
 
 
-def shorten_text(text: str, max_length: int = 650) -> str:
+def shorten_text(text: str, max_length: int = 750) -> str:
     text = clean_article_text(text)
 
     if len(text) <= max_length:
@@ -77,6 +77,60 @@ def remove_duplicate_sentences(text: str) -> str:
         unique.append(sentence.strip())
 
     return " ".join(unique).strip()
+
+
+# ------------------------------------------------------------
+# Translation helpers
+# ------------------------------------------------------------
+
+def translate_to_farsi(text: str) -> str:
+    if not text:
+        return ""
+
+    try:
+        # GoogleTranslator works better with smaller chunks.
+        text = text.strip()
+
+        if len(text) <= 3500:
+            return GoogleTranslator(source="auto", target="fa").translate(text)
+
+        chunks = []
+        current = ""
+
+        for sentence in re.split(r"(?<=[.!?])\s+", text):
+            if len(current) + len(sentence) + 1 > 3000:
+                if current:
+                    chunks.append(current)
+                current = sentence
+            else:
+                current += (" " if current else "") + sentence
+
+        if current:
+            chunks.append(current)
+
+        translated_chunks = []
+
+        for chunk in chunks:
+            translated_chunks.append(
+                GoogleTranslator(source="auto", target="fa").translate(chunk)
+            )
+
+        return "\n".join(translated_chunks)
+
+    except Exception:
+        return "ترجمه در دسترس نیست."
+
+
+def translate_optional(text: str, fallback: str = "نامشخص") -> str:
+    if not text:
+        return fallback
+
+    translated = translate_to_farsi(text)
+
+    if not translated or translated == "ترجمه در دسترس نیست.":
+        return fallback
+
+    return translated
 
 
 # ------------------------------------------------------------
@@ -143,7 +197,7 @@ async def fetch_article_details(url: str) -> Optional[str]:
         description = extract_article_description_from_html(response.text)
 
         if description:
-            return shorten_text(description, 750)
+            return shorten_text(description, 900)
 
     except Exception:
         return None
@@ -210,8 +264,6 @@ def get_entry_rss_summary(entry: Any, headline: str) -> str:
 
     combined = remove_duplicate_sentences(" ".join(summary_parts))
 
-    # Google News often repeats the title in summary.
-    # If the summary is basically the headline, ignore it.
     if not combined:
         return ""
 
@@ -224,7 +276,49 @@ def get_entry_rss_summary(entry: Any, headline: str) -> str:
     if headline_lower in combined_lower and len(combined) < len(headline) + 80:
         return ""
 
-    return shorten_text(combined, 600)
+    return shorten_text(combined, 750)
+
+
+def build_key_details_en(headline: str, summary: str, source: str, published: str) -> str:
+    details = []
+
+    if headline:
+        details.append(f"Main point: {headline}")
+
+    if source and source != "Unknown source":
+        details.append(f"Reported by: {source}")
+
+    if published and published != "time unavailable":
+        details.append(f"Published: {published}")
+
+    if summary and not summary.startswith("A detailed article summary was not available"):
+        first_sentence = re.split(r"(?<=[.!?])\s+", summary)[0].strip()
+
+        if first_sentence and first_sentence.lower() not in headline.lower():
+            details.append(f"Extra detail: {first_sentence}")
+
+    return "\n".join(f"- {item}" for item in details)
+
+
+def build_key_details_fa(headline_fa: str, summary_fa: str, source_fa: str, published_fa: str) -> str:
+    details = []
+
+    if headline_fa:
+        details.append(f"نکته اصلی: {headline_fa}")
+
+    if source_fa:
+        details.append(f"گزارش‌شده توسط: {source_fa}")
+
+    if published_fa:
+        details.append(f"زمان انتشار: {published_fa}")
+
+    if summary_fa and summary_fa != "جزئیات بیشتری از این خبر در دسترس نیست.":
+        first_sentence = re.split(r"(?<=[.!?؟])\s+", summary_fa)[0].strip()
+
+        if first_sentence:
+            details.append(f"جزئیات بیشتر: {first_sentence}")
+
+    return "\n".join(f"- {item}" for item in details)
 
 
 async def summarize_news_entry(entry: Any) -> Dict[str, str]:
@@ -251,7 +345,7 @@ async def summarize_news_entry(entry: Any) -> Dict[str, str]:
         )
         summary_source = "Fallback"
 
-    key_details = build_key_details(headline, detailed_summary, source, published)
+    key_details = build_key_details_en(headline, detailed_summary, source, published)
 
     return {
         "headline": headline,
@@ -264,47 +358,11 @@ async def summarize_news_entry(entry: Any) -> Dict[str, str]:
     }
 
 
-def build_key_details(headline: str, summary: str, source: str, published: str) -> str:
-    details = []
-
-    if headline:
-        details.append(f"Main point: {headline}")
-
-    if source and source != "Unknown source":
-        details.append(f"Reported by: {source}")
-
-    if published and published != "time unavailable":
-        details.append(f"Published: {published}")
-
-    if summary and not summary.startswith("A detailed article summary was not available"):
-        first_sentence = re.split(r"(?<=[.!?])\s+", summary)[0].strip()
-
-        if first_sentence and first_sentence.lower() not in headline.lower():
-            details.append(f"Extra detail: {first_sentence}")
-
-    return "\n".join(f"- {item}" for item in details)
-
-
-# ------------------------------------------------------------
-# Translation
-# ------------------------------------------------------------
-
-def translate_to_farsi(text: str) -> str:
-    if not text:
-        return ""
-
-    try:
-        text = text[:1200]
-        return GoogleTranslator(source="auto", target="fa").translate(text)
-    except Exception:
-        return "ترجمه در دسترس نیست."
-
-
 # ------------------------------------------------------------
 # Report builders
 # ------------------------------------------------------------
 
-def build_news_item_text(index: int, item: Dict[str, str], include_translation: bool = True) -> str:
+def build_news_item_text(index: int, item: Dict[str, str]) -> str:
     headline = item["headline"]
     source = item["source"]
     published = item["published"]
@@ -312,6 +370,18 @@ def build_news_item_text(index: int, item: Dict[str, str], include_translation: 
     summary_source = item["summary_source"]
     key_details = item["key_details"]
     link = item["link"]
+
+    headline_fa = translate_optional(headline)
+    source_fa = translate_optional(source)
+    published_fa = translate_optional(published)
+    summary_source_fa = translate_optional(summary_source)
+    summary_fa = translate_optional(summary, fallback="جزئیات بیشتری از این خبر در دسترس نیست.")
+    key_details_fa = build_key_details_fa(
+        headline_fa=headline_fa,
+        summary_fa=summary_fa,
+        source_fa=source_fa,
+        published_fa=published_fa,
+    )
 
     lines = [
         f"{index}. {headline}",
@@ -334,16 +404,29 @@ def build_news_item_text(index: int, item: Dict[str, str], include_translation: 
             ]
         )
 
-    if include_translation:
-        headline_fa = translate_to_farsi(headline)
-        summary_fa = translate_to_farsi(summary)
+    lines.extend(
+        [
+            "",
+            "ترجمه کامل فارسی:",
+            "",
+            f"{index}. {headline_fa}",
+            f"منبع: {source_fa}",
+            f"زمان انتشار: {published_fa}",
+            f"منبع خلاصه: {summary_source_fa}",
+            "",
+            "خلاصه تفصیلی:",
+            summary_fa,
+            "",
+            "جزئیات کلیدی:",
+            key_details_fa,
+        ]
+    )
 
+    if link:
         lines.extend(
             [
                 "",
-                "ترجمه فارسی:",
-                f"عنوان: {headline_fa}",
-                f"خلاصه: {summary_fa}",
+                f"لینک: {link}",
             ]
         )
 
@@ -381,14 +464,19 @@ async def build_trump_news_report() -> str:
     lines = [
         "Latest Trump-related news summary",
         "Sorted chronologically, newest first",
-        "English + Farsi translation",
+        "English + full Farsi translation",
         "Source: Google News RSS, with article metadata when available",
+        "",
+        "خلاصه آخرین خبرهای مرتبط با ترامپ",
+        "مرتب‌شده بر اساس زمان، از جدیدترین به قدیمی‌ترین",
+        "انگلیسی + ترجمه کامل فارسی",
+        "منبع: Google News RSS، همراه با متادیتای مقاله در صورت دسترسی",
         "",
     ]
 
     for index, entry in enumerate(entries, start=1):
         item = await summarize_news_entry(entry)
-        lines.append(build_news_item_text(index, item, include_translation=True))
+        lines.append(build_news_item_text(index, item))
 
     return "\n".join(lines)
 
@@ -402,7 +490,9 @@ async def trump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        await update.message.reply_text("Loading latest Trump-related news with detailed summaries...")
+        await update.message.reply_text(
+            "Loading latest Trump-related news with full Farsi translation..."
+        )
 
         text = await build_trump_news_report()
 
@@ -420,15 +510,17 @@ async def trumpfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     try:
-        await update.message.reply_text("Creating detailed Trump-related news report file...")
+        await update.message.reply_text(
+            "Creating detailed bilingual Trump-related news report file..."
+        )
 
         text = await build_trump_news_report()
-        filename = "trump_news_detailed_report.txt"
+        filename = "trump_news_bilingual_report.txt"
         file_output = text_to_file(text, filename)
 
         await update.message.reply_document(
             document=InputFile(file_output, filename=filename),
-            caption="Detailed Trump-related news report",
+            caption="Detailed bilingual Trump-related news report",
         )
 
     except Exception as error:
