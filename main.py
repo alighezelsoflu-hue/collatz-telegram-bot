@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from config import (
@@ -17,6 +17,14 @@ from modules.photo_module import register_photo_handlers
 from modules.news_module import register_news_handlers
 from modules.fifa_module import register_fifa_handlers
 
+# Optional AI photo module.
+# If you created modules/ai_photo_module.py, this will load it.
+# If not, the bot still works normally.
+try:
+    from modules.ai_photo_module import register_ai_photo_handlers
+except Exception:
+    register_ai_photo_handlers = None
+
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -26,12 +34,18 @@ telegram_app = Application.builder().token(TOKEN).build()
 api = FastAPI(title="LakLak Multi Tool Telegram Bot")
 
 
+# ------------------------------------------------------------
+# Telegram commands
+# ------------------------------------------------------------
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
     await update.message.reply_text(
-        "Hello! I can calculate math sequences, edit photos, show World Cup 2026 info, and summarize Trump-related news.\n\n"
+        "Hello! I am LakLak Bot.\n"
+        "I can calculate math problems, edit photos, show World Cup 2026 info, and summarize news.\n\n"
+
         "Math:\n"
         "/collatz 27 - calculate Collatz and send all steps as a text file\n"
         "/fib 20 - calculate Fibonacci number F(20)\n"
@@ -46,28 +60,112 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/pi - show pi number\n"
         "/e - show Euler's number\n"
         "/mathhelp - show calculator examples\n\n"
+
         "Photos:\n"
-        "/vintage - send a photo and I make it vintage\n"
-        "/cartoon - send a photo and I make it cartoon style\n"
-        "/caricature - send a photo and I make it fun caricature style\n"
-        "/sticker - send a photo and I make it sticker style\n"
-        "/beach - send a photo and I make it summer/beach style\n\n"
+        "/enhance - improve brightness, contrast, color, and sharpness\n"
+        "/vintage - vintage photo effect\n"
+        "/bw - black and white photo\n"
+        "/cinematic - cinematic photo look\n"
+        "/clean - clean and sharpen photo\n"
+        "/profile - square profile-style crop\n"
+        "/cartoon - cartoon photo style\n"
+        "/caricature - stronger caricature style\n"
+        "/sticker - sticker-style PNG\n"
+        "/beach - summer/beach filter\n"
+        "/photoinfo - show photo information\n\n"
+
+        "AI Photos:\n"
+        "/ai_enhance - AI photo enhancement\n"
+        "/ai_portrait - AI portrait style\n"
+        "/ai_cartoon - AI cartoon style\n"
+        "/ai_anime - AI anime style\n"
+        "/ai_studio - AI studio photo style\n"
+        "/ai_background - AI background improvement\n"
+        "/ai_magic - AI artistic transformation\n"
+        "/ai_prompt your custom instruction - save custom AI prompt\n"
+        "/ai_reset - reset AI photo mode and prompt\n\n"
+
         "World Cup 2026:\n"
         "/wc_today - today's matches in EU and Iran time\n"
         "/wc_tomorrow - tomorrow's matches in EU and Iran time\n"
         "/wc_live - live World Cup matches\n"
         "/wc_group A - Group A standings as a text file\n"
         "/wc_standings - all group standings as a text file\n\n"
+
         "News:\n"
-        "/trump - latest Trump-related news with detailed summaries and Farsi translation\n"
+        "/trump - latest Trump-related news with detailed English and Farsi report\n"
         "/trumpfile - send detailed Trump-related news as a text file\n\n"
-        "/cancel - cancel current photo mode"
+
+        "/cancel - cancel current photo mode\n\n"
+        "Tip: type / to see the command menu."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
 
+
+# ------------------------------------------------------------
+# Telegram command preview menu
+# ------------------------------------------------------------
+
+async def setup_bot_commands() -> None:
+    commands = [
+        BotCommand("start", "Show main menu"),
+        BotCommand("help", "Show help menu"),
+
+        BotCommand("collatz", "Calculate Collatz sequence"),
+        BotCommand("fib", "Calculate Fibonacci number"),
+        BotCommand("fibonacci", "Calculate Fibonacci number"),
+        BotCommand("fiblist", "Send Fibonacci series as file"),
+        BotCommand("stats", "Calculate statistics"),
+        BotCommand("statistics", "Calculate statistics"),
+        BotCommand("statsfile", "Send statistics report as file"),
+        BotCommand("calc", "Scientific calculator"),
+        BotCommand("pi", "Show pi number"),
+        BotCommand("e", "Show Euler number"),
+        BotCommand("mathhelp", "Show math examples"),
+
+        BotCommand("enhance", "Improve photo quality"),
+        BotCommand("vintage", "Vintage photo effect"),
+        BotCommand("bw", "Black and white photo"),
+        BotCommand("cinematic", "Cinematic photo look"),
+        BotCommand("clean", "Clean and sharpen photo"),
+        BotCommand("profile", "Square profile photo"),
+        BotCommand("cartoon", "Cartoon photo effect"),
+        BotCommand("caricature", "Caricature photo effect"),
+        BotCommand("sticker", "Sticker style image"),
+        BotCommand("beach", "Summer beach photo effect"),
+        BotCommand("photoinfo", "Show photo information"),
+
+        BotCommand("ai_enhance", "AI photo enhancement"),
+        BotCommand("ai_portrait", "AI portrait style"),
+        BotCommand("ai_cartoon", "AI cartoon style"),
+        BotCommand("ai_anime", "AI anime style"),
+        BotCommand("ai_studio", "AI studio photo style"),
+        BotCommand("ai_background", "AI background improvement"),
+        BotCommand("ai_magic", "AI artistic transformation"),
+        BotCommand("ai_prompt", "Save custom AI photo prompt"),
+        BotCommand("ai_reset", "Reset AI photo mode"),
+
+        BotCommand("wc_today", "World Cup matches today"),
+        BotCommand("wc_tomorrow", "World Cup matches tomorrow"),
+        BotCommand("wc_live", "Live World Cup matches"),
+        BotCommand("wc_group", "World Cup group standings"),
+        BotCommand("wc_standings", "All World Cup standings"),
+
+        BotCommand("trump", "Latest Trump news summary"),
+        BotCommand("trumpfile", "Trump news report file"),
+
+        BotCommand("cancel", "Cancel current photo mode"),
+    ]
+
+    await telegram_app.bot.set_my_commands(commands)
+
+
+# ------------------------------------------------------------
+# Handler registration
+# ------------------------------------------------------------
 
 def register_handlers() -> None:
     telegram_app.add_handler(CommandHandler("start", start))
@@ -76,16 +174,26 @@ def register_handlers() -> None:
     register_math_handlers(telegram_app)
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
+
+    if register_ai_photo_handlers is not None:
+        register_ai_photo_handlers(telegram_app)
+
     register_photo_handlers(telegram_app)
 
 
 register_handlers()
 
 
+# ------------------------------------------------------------
+# FastAPI lifecycle
+# ------------------------------------------------------------
+
 @api.on_event("startup")
 async def startup() -> None:
     await telegram_app.initialize()
     await telegram_app.start()
+
+    await setup_bot_commands()
 
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{SECRET_PATH}"
@@ -101,25 +209,73 @@ async def shutdown() -> None:
     await telegram_app.shutdown()
 
 
+# ------------------------------------------------------------
+# FastAPI routes
+# ------------------------------------------------------------
+
 @api.get("/")
 async def root():
     return {
         "status": "ok",
         "message": "LakLak multi-tool Telegram bot is running.",
         "usage": [
+            "/start",
+            "/help",
+
             "/collatz 27",
+            "/fib 20",
+            "/fibonacci 20",
+            "/fiblist 30",
+            "/stats 4 7 9 10 10",
+            "/stats 4, pi, sin(pi / 2), log(100, 10)",
+            "/statsfile 4 7 9 10 10",
+            "/calc sin(pi / 2)",
+            "/calc log(100, 10)",
+            "/calc sqrt(144)",
+            "/pi",
+            "/e",
+            "/mathhelp",
+
+            "/enhance",
+            "/vintage",
+            "/bw",
+            "/cinematic",
+            "/clean",
+            "/profile",
+            "/cartoon",
+            "/caricature",
+            "/sticker",
+            "/beach",
+            "/photoinfo",
+
+            "/ai_enhance",
+            "/ai_portrait",
+            "/ai_cartoon",
+            "/ai_anime",
+            "/ai_studio",
+            "/ai_background",
+            "/ai_magic",
+            "/ai_prompt",
+            "/ai_reset",
+
             "/wc_today",
             "/wc_tomorrow",
             "/wc_live",
             "/wc_group A",
             "/wc_standings",
+
             "/trump",
-            "/vintage",
-            "/cartoon",
-            "/caricature",
-            "/sticker",
-            "/beach",
+            "/trumpfile",
+
+            "/cancel",
         ],
+        "modules": {
+            "math": True,
+            "photo": True,
+            "ai_photo": register_ai_photo_handlers is not None,
+            "news": True,
+            "fifa": True,
+        },
         "football_provider": "football-data.org",
         "world_cup_competition": WORLD_CUP_COMPETITION,
         "world_cup_season": WORLD_CUP_SEASON,
