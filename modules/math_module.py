@@ -164,7 +164,33 @@ def build_fibonacci_list_report(count: int) -> str:
 MAX_STATS_COUNT = 5000
 
 
+def format_number(value: Any, max_digits: int = 12) -> str:
+    if value is None:
+        return "N/A"
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "∞" if value > 0 else "-∞"
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.{max_digits}g}"
+
+    return str(value)
+
+
 def parse_number_list(args: List[str]) -> List[float]:
+    """
+    Simple parser for plain numbers.
+
+    Supports:
+    /stats 4 7 9 10
+    /stats 4,7,9,10
+    """
     if not args:
         raise ValueError("Please send numbers. Example: /stats 4 7 9 10 10")
 
@@ -188,25 +214,6 @@ def parse_number_list(args: List[str]) -> List[float]:
             raise ValueError(f"Invalid number: {part}")
 
     return numbers
-
-
-def format_number(value: Any, max_digits: int = 12) -> str:
-    if value is None:
-        return "N/A"
-
-    if isinstance(value, int):
-        return str(value)
-
-    if isinstance(value, float):
-        if math.isnan(value):
-            return "NaN"
-        if math.isinf(value):
-            return "∞" if value > 0 else "-∞"
-        if value.is_integer():
-            return str(int(value))
-        return f"{value:.{max_digits}g}"
-
-    return str(value)
 
 
 def calculate_median(sorted_numbers: List[float]) -> float:
@@ -248,12 +255,17 @@ def calculate_modes(numbers: List[float]) -> List[float]:
 
     highest_frequency = max(frequencies)
 
+    # If every value appears only once, there is no mode.
     if highest_frequency == 1:
         return []
 
-    # Your requested rule:
-    # If all distinct values appear the same number of times,
-    # the data set has no mode: Mo = ∅
+    # User-requested rule:
+    # If all distinct values have exactly the same frequency,
+    # this bot treats the data set as having no mode.
+    #
+    # Example:
+    # 2, 4, 7 each appear 3 times
+    # Mode: Mo = ∅
     if len(set(frequencies)) == 1:
         return []
 
@@ -438,27 +450,35 @@ def calc_median(*values: float) -> float:
 def calc_mode(*values: float) -> Any:
     if not values:
         raise ValueError("mode() needs at least one number.")
+
     modes = calculate_modes([float(v) for v in values])
+
     if not modes:
         return "Mo = ∅"
+
     if len(modes) == 1:
         return modes[0]
+
     return modes
 
 
 def calc_variance(*values: float) -> float:
     if not values:
         raise ValueError("variance() needs at least one number.")
+
     values = [float(v) for v in values]
     mean_value = calc_mean(*values)
+
     return sum((x - mean_value) ** 2 for x in values) / len(values)
 
 
 def calc_sample_variance(*values: float) -> float:
     if len(values) < 2:
         raise ValueError("sample_variance() needs at least two numbers.")
+
     values = [float(v) for v in values]
     mean_value = calc_mean(*values)
+
     return sum((x - mean_value) ** 2 for x in values) / (len(values) - 1)
 
 
@@ -473,6 +493,7 @@ def calc_sample_std(*values: float) -> float:
 def calc_range(*values: float) -> float:
     if not values:
         raise ValueError("range() needs at least one number.")
+
     return max(values) - min(values)
 
 
@@ -483,31 +504,41 @@ def calc_percent(value: float, percent: float) -> float:
 def calc_factorial(value: float) -> int:
     if not float(value).is_integer():
         raise ValueError("factorial() only accepts whole numbers.")
+
     value = int(value)
+
     if value < 0:
         raise ValueError("factorial() does not accept negative numbers.")
+
     if value > 1000:
         raise ValueError("factorial() accepts values up to 1000.")
+
     return math.factorial(value)
 
 
 def calc_ncr(n: float, r: float) -> int:
     if not float(n).is_integer() or not float(r).is_integer():
         raise ValueError("ncr() accepts whole numbers only.")
+
     n = int(n)
     r = int(r)
+
     if n < 0 or r < 0:
         raise ValueError("ncr() does not accept negative numbers.")
+
     return math.comb(n, r)
 
 
 def calc_npr(n: float, r: float) -> int:
     if not float(n).is_integer() or not float(r).is_integer():
         raise ValueError("npr() accepts whole numbers only.")
+
     n = int(n)
     r = int(r)
+
     if n < 0 or r < 0:
         raise ValueError("npr() does not accept negative numbers.")
+
     return math.perm(n, r)
 
 
@@ -532,6 +563,7 @@ SAFE_CONSTANTS = {
     "nan": math.nan,
 }
 
+
 SAFE_FUNCTIONS = {
     # Basic
     "abs": abs,
@@ -552,7 +584,7 @@ SAFE_FUNCTIONS = {
     "log10": math.log10,
     "log2": math.log2,
 
-    # Trigonometry, radians
+    # Trigonometry in radians
     "sin": math.sin,
     "cos": math.cos,
     "tan": math.tan,
@@ -561,7 +593,7 @@ SAFE_FUNCTIONS = {
     "atan": math.atan,
     "atan2": math.atan2,
 
-    # Trigonometry, degrees
+    # Trigonometry in degrees
     "sind": lambda x: math.sin(math.radians(x)),
     "cosd": lambda x: math.cos(math.radians(x)),
     "tand": lambda x: math.tan(math.radians(x)),
@@ -580,7 +612,7 @@ SAFE_FUNCTIONS = {
     "rad": rad,
     "radians": rad,
 
-    # Number theory / combinatorics
+    # Number theory and combinatorics
     "factorial": calc_factorial,
     "fact": calc_factorial,
     "gcd": math.gcd,
@@ -615,6 +647,7 @@ SAFE_FUNCTIONS = {
     "fibonacci": fibonacci_number,
 }
 
+
 SAFE_BINARY_OPERATORS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -624,6 +657,7 @@ SAFE_BINARY_OPERATORS = {
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
 }
+
 
 SAFE_UNARY_OPERATORS = {
     ast.UAdd: operator.pos,
@@ -638,6 +672,7 @@ class SafeMathEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> Any:
         if isinstance(node.value, (int, float)):
             return node.value
+
         raise ValueError("Only numbers are allowed.")
 
     def visit_Name(self, node: ast.Name) -> Any:
@@ -662,9 +697,12 @@ class SafeMathEvaluator(ast.NodeVisitor):
                 raise ValueError("Power is too large.")
             if abs(left) > 10**10:
                 raise ValueError("Base is too large.")
+            if abs(left) > 1000 and abs(right) > 20:
+                raise ValueError("Power result would be too large.")
 
         result = SAFE_BINARY_OPERATORS[operator_type](left, right)
         self.check_result(result)
+
         return result
 
     def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
@@ -675,7 +713,9 @@ class SafeMathEvaluator(ast.NodeVisitor):
 
         value = self.visit(node.operand)
         result = SAFE_UNARY_OPERATORS[operator_type](value)
+
         self.check_result(result)
+
         return result
 
     def visit_Call(self, node: ast.Call) -> Any:
@@ -694,9 +734,11 @@ class SafeMathEvaluator(ast.NodeVisitor):
             raise ValueError("Too many function arguments.")
 
         args = [self.visit(arg) for arg in node.args]
+
         result = SAFE_FUNCTIONS[function_name](*args)
 
         self.check_result(result)
+
         return result
 
     def visit_List(self, node: ast.List) -> Any:
@@ -737,6 +779,105 @@ def safe_calculate(expression: str) -> Any:
     return evaluator.visit(parsed)
 
 
+def split_top_level_commas(text: str) -> List[str]:
+    """
+    Splits by commas, but ignores commas inside parentheses.
+
+    Example:
+    4, pi, sin(pi / 2), log(100, 10)
+    becomes:
+    ["4", "pi", "sin(pi / 2)", "log(100, 10)"]
+    """
+    items = []
+    current = []
+    depth = 0
+
+    for char in text:
+        if char == "(":
+            depth += 1
+            current.append(char)
+
+        elif char == ")":
+            depth -= 1
+
+            if depth < 0:
+                raise ValueError("Unbalanced parentheses.")
+
+            current.append(char)
+
+        elif char == "," and depth == 0:
+            item = "".join(current).strip()
+
+            if item:
+                items.append(item)
+
+            current = []
+
+        else:
+            current.append(char)
+
+    if depth != 0:
+        raise ValueError("Unbalanced parentheses.")
+
+    item = "".join(current).strip()
+
+    if item:
+        items.append(item)
+
+    return items
+
+
+def parse_math_number_list(args: List[str]) -> List[float]:
+    """
+    Parses numbers or math expressions for /stats.
+
+    Supports:
+    /stats 4 7 9 10
+    /stats 4, 7, 9, 10
+    /stats 4, pi, 4, sin(pi / 2), 7, 4, 2, 2, log(100, 10)
+    """
+    if not args:
+        raise ValueError(
+            "Please send numbers or expressions. Example:\n"
+            "/stats 4, pi, sin(pi / 2), log(100, 10)"
+        )
+
+    raw_text = " ".join(args).strip()
+
+    if not raw_text:
+        raise ValueError("Please send numbers or expressions.")
+
+    if "," in raw_text:
+        parts = split_top_level_commas(raw_text)
+    else:
+        parts = raw_text.split()
+
+    if not parts:
+        raise ValueError("Please send numbers or expressions.")
+
+    if len(parts) > MAX_STATS_COUNT:
+        raise ValueError(f"Please send up to {MAX_STATS_COUNT:,} values.")
+
+    numbers = []
+
+    for part in parts:
+        try:
+            result = safe_calculate(part)
+
+            if not isinstance(result, (int, float)):
+                raise ValueError(f"Expression did not return a number: {part}")
+
+            if isinstance(result, float) and (math.isnan(result) or math.isinf(result)):
+                raise ValueError(f"Expression returned invalid number: {part}")
+
+            numbers.append(float(result))
+
+        except Exception as error:
+            raise ValueError(f"Invalid value: {part}\nReason: {error}")
+
+    return numbers
+
+
 def build_math_help_text() -> str:
     return (
         "Scientific calculator help\n\n"
@@ -765,6 +906,8 @@ def build_math_help_text() -> str:
         "/calc median(4,7,4,2,7,4,2,2,7)\n"
         "/calc mode(4,7,4,2,7,4,2,2,7)\n"
         "/calc std(4,7,4,2,7,4,2,2,7)\n\n"
+        "Statistics command with expressions:\n"
+        "/stats 4, pi, 4, sin(pi / 2), 7, 4, 2, 2, log(100, 10)\n\n"
         "Combinatorics:\n"
         "/calc ncr(5, 2)\n"
         "/calc npr(5, 2)\n\n"
@@ -887,7 +1030,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     try:
-        numbers = parse_number_list(context.args)
+        numbers = parse_math_number_list(context.args)
         summary = build_statistics_short_summary(numbers)
 
         await update.message.reply_text(summary)
@@ -897,7 +1040,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"{error}\n\n"
             "Examples:\n"
             "/stats 4 7 9 10 10\n"
-            "/stats 4, 7, 9, 10, 10"
+            "/stats 4, 7, 9, 10, 10\n"
+            "/stats 4, pi, sin(pi / 2), log(100, 10)"
         )
 
 
@@ -906,7 +1050,7 @@ async def statsfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     try:
-        numbers = parse_number_list(context.args)
+        numbers = parse_math_number_list(context.args)
         report_text = build_statistics_report(numbers)
 
         filename = "statistics_report.txt"
@@ -927,7 +1071,8 @@ async def statsfile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"{error}\n\n"
             "Examples:\n"
             "/statsfile 4 7 9 10 10\n"
-            "/statsfile 4, 7, 9, 10, 10"
+            "/statsfile 4, 7, 9, 10, 10\n"
+            "/statsfile 4, pi, sin(pi / 2), log(100, 10)"
         )
 
 
