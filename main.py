@@ -59,7 +59,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/wc_group A - Group A standings as a text file\n"
         "/wc_standings - all group standings as a text file\n\n"
         "News:\n"
-        "/trump - latest Trump-related news summary with Farsi translation\n\n"
+        "/trump - latest Trump-related news with detailed summaries and Farsi translation\n"
+        "/trumpfile - send detailed Trump-related news as a text file\n\n"
         "/cancel - cancel current photo mode"
     )
 
