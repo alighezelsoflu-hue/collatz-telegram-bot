@@ -31,9 +31,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(
-        "Hello! I can calculate Collatz sequences, edit photos, show World Cup 2026 info, and summarize Trump-related news.\n\n"
+        "Hello! I can calculate math sequences, edit photos, show World Cup 2026 info, and summarize Trump-related news.\n\n"
         "Math:\n"
-        "/collatz 27 - calculate Collatz and send all steps as a text file\n\n"
+        "/collatz 27 - calculate Collatz and send all steps as a text file\n"
+        "/fib 20 - calculate Fibonacci number F(20)\n"
+        "/fibonacci 20 - same as /fib\n"
+        "/fiblist 30 - send the first 30 Fibonacci numbers as a text file\n\n"
         "Photos:\n"
         "/vintage - send a photo and I make it vintage\n"
         "/cartoon - send a photo and I make it cartoon style\n"
