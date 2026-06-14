@@ -96,7 +96,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Group activity:\n"
         "/activity_today - show today's group activity report\n"
         "/activity_week - show last 7 days group activity report\n"
-        "/leaderboard - show most active members\n"
+        "/activity_month - show last 30 days group activity report\n"
+        "/activity_year - show group activity since 1 January 2025\n"
+        "/leaderboard - show most active members from last 7 days\n"
         "/activity_chart - send leaderboard chart as image\n"
         "/awards - fun weekly group awards\n\n"
 
@@ -120,6 +122,8 @@ async def setup_bot_commands() -> None:
 
         BotCommand("activity_today", "Today group activity report"),
         BotCommand("activity_week", "Weekly group activity report"),
+        BotCommand("activity_month", "Monthly group activity report"),
+        BotCommand("activity_year", "Activity since Jan 1 2025"),
         BotCommand("leaderboard", "Most active members"),
         BotCommand("activity_chart", "Group activity chart"),
         BotCommand("awards", "Weekly group awards"),

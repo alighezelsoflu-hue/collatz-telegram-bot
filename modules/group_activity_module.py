@@ -1,7 +1,6 @@
 import os
 import re
 import sqlite3
-from collections import Counter
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
@@ -11,10 +10,6 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-
-# ------------------------------------------------------------
-# Settings
-# ------------------------------------------------------------
 
 DB_PATH = os.getenv("GROUP_ACTIVITY_DB_PATH", "group_activity.db")
 GROUP_ACTIVITY_TIMEZONE = os.getenv("GROUP_ACTIVITY_TIMEZONE", "Europe/Berlin")
@@ -68,9 +63,20 @@ def init_activity_db() -> None:
         """
     )
 
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_chat_date ON group_messages(chat_id, message_date_ts)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_user_date ON group_messages(chat_id, user_id, message_date_ts)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_type_date ON group_messages(chat_id, message_type, message_date_ts)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_chat_date "
+        "ON group_messages(chat_id, message_date_ts)"
+    )
+
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_user_date "
+        "ON group_messages(chat_id, user_id, message_date_ts)"
+    )
+
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_group_type_date "
+        "ON group_messages(chat_id, message_type, message_date_ts)"
+    )
 
     conn.commit()
     conn.close()
@@ -227,6 +233,14 @@ def get_period_start(period: str) -> Tuple[float, str]:
     elif period == "week":
         start_local = now_local - timedelta(days=7)
         label = "last 7 days"
+
+    elif period == "month":
+        start_local = now_local - timedelta(days=30)
+        label = "last 30 days"
+
+    elif period == "year":
+        start_local = datetime(2025, 1, 1, 0, 0, 0, tzinfo=LOCAL_TZ)
+        label = "since 1 January 2025"
 
     else:
         start_local = now_local - timedelta(days=7)
@@ -440,29 +454,6 @@ def get_leaderboard_rows(chat_id: int, period: str = "week", limit: int = 10) ->
     return rows
 
 
-def get_hourly_rows(chat_id: int, period: str = "week") -> List[sqlite3.Row]:
-    start_ts, _ = get_period_start(period)
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT local_hour, COUNT(*) AS count
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        GROUP BY local_hour
-        ORDER BY local_hour ASC
-        """,
-        (chat_id, start_ts),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return rows
-
-
 def get_award_data(chat_id: int) -> Dict:
     start_ts, _ = get_period_start("week")
 
@@ -532,7 +523,7 @@ def get_award_data(chat_id: int) -> Dict:
 
 
 # ------------------------------------------------------------
-# Chart generation with Pillow
+# Chart generation
 # ------------------------------------------------------------
 
 def load_font(size: int = 24):
@@ -621,7 +612,7 @@ def create_leaderboard_chart(rows: List[sqlite3.Row], title: str) -> BytesIO:
 
 
 # ------------------------------------------------------------
-# Report builders
+# Reports
 # ------------------------------------------------------------
 
 def build_activity_report(chat_title: str, stats: Dict) -> str:
@@ -754,6 +745,36 @@ async def activity_week_command(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(text)
 
 
+async def activity_month_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+
+    error = ensure_group_message(update)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    stats = get_basic_stats(update.effective_chat.id, "month")
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
+
+    await update.message.reply_text(text)
+
+
+async def activity_year_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_chat:
+        return
+
+    error = ensure_group_message(update)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    stats = get_basic_stats(update.effective_chat.id, "year")
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
+
+    await update.message.reply_text(text)
+
+
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
         return
@@ -809,12 +830,14 @@ async def awards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def register_group_activity_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("activity_today", activity_today_command))
     app.add_handler(CommandHandler("activity_week", activity_week_command))
+    app.add_handler(CommandHandler("activity_month", activity_month_command))
+    app.add_handler(CommandHandler("activity_year", activity_year_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
     app.add_handler(CommandHandler("activity_chart", activity_chart_command))
     app.add_handler(CommandHandler("awards", awards_command))
 
-    # Silent tracker.
-    # It does not reply to normal messages.
+    # Silent tracker. It collects future group messages only.
+    # It does not reply to normal group messages.
     app.add_handler(
         MessageHandler(filters.ChatType.GROUPS & filters.ALL, track_group_activity),
         group=50,
