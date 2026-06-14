@@ -13,16 +13,12 @@ from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 
-# ------------------------------------------------------------
-# Settings
-# ------------------------------------------------------------
-
 MAX_IMAGE_SIZE = 1600
 PROFILE_SIZE = 1080
 
 
 # ------------------------------------------------------------
-# General helpers
+# Helpers
 # ------------------------------------------------------------
 
 def resize_for_telegram(img: Image.Image, max_size: int = MAX_IMAGE_SIZE) -> Image.Image:
@@ -49,7 +45,7 @@ def image_to_bytes(
         output.name = filename or "ai_photo.png"
 
     else:
-        raise ValueError("Unsupported image format. Use JPEG or PNG.")
+        raise ValueError("Unsupported image format.")
 
     output.seek(0)
     return output
@@ -64,17 +60,17 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
     if not parts:
         return None
 
-    first = parts[0].strip().lower()
+    command = parts[0].strip().lower()
 
-    if not first.startswith("/"):
+    if not command.startswith("/"):
         return None
 
-    first = first[1:]
+    command = command[1:]
 
-    if "@" in first:
-        first = first.split("@", 1)[0]
+    if "@" in command:
+        command = command.split("@", 1)[0]
 
-    return first
+    return command
 
 
 def crop_center_square(img: Image.Image) -> Image.Image:
@@ -83,10 +79,8 @@ def crop_center_square(img: Image.Image) -> Image.Image:
 
     left = (width - side) // 2
     top = (height - side) // 2
-    right = left + side
-    bottom = top + side
 
-    return img.crop((left, top, right, bottom))
+    return img.crop((left, top, left + side, top + side))
 
 
 def estimate_brightness(img: Image.Image) -> float:
@@ -119,7 +113,7 @@ def add_vignette(img: Image.Image, strength: float = 0.45) -> Image.Image:
     return Image.composite(img, dark, mask)
 
 
-def add_glow(img: Image.Image, strength: float = 0.25, radius: float = 8.0) -> Image.Image:
+def add_glow(img: Image.Image, strength: float = 0.20, radius: float = 8.0) -> Image.Image:
     img = img.convert("RGB")
     glow = img.filter(ImageFilter.GaussianBlur(radius=radius))
     glow = ImageEnhance.Brightness(glow).enhance(1.12)
@@ -127,9 +121,7 @@ def add_glow(img: Image.Image, strength: float = 0.25, radius: float = 8.0) -> I
 
 
 def local_ai_base_enhance(img: Image.Image) -> Image.Image:
-    img = img.convert("RGB")
-    img = resize_for_telegram(img)
-
+    img = resize_for_telegram(img).convert("RGB")
     img = ImageOps.autocontrast(img, cutoff=1)
 
     brightness = estimate_brightness(img)
@@ -162,7 +154,7 @@ def make_edge_mask(img: Image.Image, threshold: int = 70) -> Image.Image:
     return edges.convert("RGB")
 
 
-def center_subject_mask(width: int, height: int, blur_radius: int = 55) -> Image.Image:
+def center_subject_mask(width: int, height: int, blur_radius: int = 60) -> Image.Image:
     mask = Image.new("L", (width, height), 0)
 
     center_w = int(width * 0.58)
@@ -179,7 +171,7 @@ def center_subject_mask(width: int, height: int, blur_radius: int = 55) -> Image
 
 
 # ------------------------------------------------------------
-# Free local AI-style effects
+# Free AI-style filters
 # ------------------------------------------------------------
 
 def apply_ai_enhance(img: Image.Image) -> Image.Image:
@@ -201,7 +193,7 @@ def apply_ai_portrait(img: Image.Image) -> Image.Image:
     foreground = ImageEnhance.Contrast(foreground).enhance(1.08)
     foreground = ImageEnhance.Sharpness(foreground).enhance(1.18)
 
-    mask = center_subject_mask(width, height, blur_radius=55)
+    mask = center_subject_mask(width, height, blur_radius=60)
 
     result = Image.composite(foreground, background, mask)
     result = add_vignette(result, strength=0.50)
@@ -259,9 +251,9 @@ def apply_ai_studio(img: Image.Image) -> Image.Image:
 
     width, height = img.size
 
-    background = Image.new("RGB", (width, height), "#20242b")
+    dark_background = Image.new("RGB", (width, height), "#20242b")
     blurred = img.filter(ImageFilter.GaussianBlur(radius=8))
-    background = Image.blend(background, blurred, 0.35)
+    background = Image.blend(dark_background, blurred, 0.35)
 
     foreground = ImageEnhance.Brightness(img).enhance(1.06)
     foreground = ImageEnhance.Contrast(foreground).enhance(1.16)
@@ -366,6 +358,19 @@ AI_CAPTIONS = {
 }
 
 
+AI_MODE_ALIASES = {
+    "ai_bg": "ai_background",
+    "ai_back": "ai_background",
+    "ai_art": "ai_magic",
+    "ai_avatar": "ai_profile",
+}
+
+
+def normalize_ai_mode_name(mode: str) -> str:
+    mode = mode.lower().strip()
+    return AI_MODE_ALIASES.get(mode, mode)
+
+
 def available_ai_photo_commands_text() -> str:
     return (
         "Free AI-style photo commands:\n\n"
@@ -375,25 +380,13 @@ def available_ai_photo_commands_text() -> str:
         "/ai_anime - anime-inspired style\n"
         "/ai_studio - studio portrait look\n"
         "/ai_background - blur and improve background style\n"
+        "/ai_bg - same as /ai_background\n"
         "/ai_magic - colorful artistic transformation\n"
         "/ai_profile - square profile-style AI enhancement\n"
+        "/ai_avatar - same as /ai_profile\n"
         "/ai_reset - reset AI photo mode\n\n"
-        "Note: This is free local AI-style editing with Pillow. "
-        "It does not use paid cloud AI."
+        "This version is free and uses Pillow only. It does not use paid cloud AI."
     )
-
-
-def normalize_ai_mode_name(mode: str) -> str:
-    mode = mode.lower().strip()
-
-    aliases = {
-        "ai_bg": "ai_background",
-        "ai_back": "ai_background",
-        "ai_art": "ai_magic",
-        "ai_avatar": "ai_profile",
-    }
-
-    return aliases.get(mode, mode)
 
 
 async def set_ai_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
@@ -401,6 +394,7 @@ async def set_ai_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     mode = normalize_ai_mode_name(mode)
+
     context.user_data["ai_photo_mode"] = mode
     context.user_data.pop("photo_mode", None)
 
@@ -451,7 +445,6 @@ async def ai_prompt_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text(
         "This free local AI-style module does not use text prompts.\n\n"
-        "Use one of these modes instead:\n\n"
         + available_ai_photo_commands_text()
     )
 
@@ -473,7 +466,7 @@ async def ai_photohelp_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ------------------------------------------------------------
-# Photo handler
+# AI photo handler
 # ------------------------------------------------------------
 
 async def ai_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -485,21 +478,17 @@ async def ai_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     mode = context.user_data.get("ai_photo_mode")
     caption_command = normalize_caption_command(message.caption)
 
-    # If photo caption contains an AI command like /ai_enhance,
-    # use that directly.
     if caption_command and caption_command.startswith("ai_"):
         mode = normalize_ai_mode_name(caption_command)
 
-    # If no AI mode is selected, do nothing.
+    # Random normal photo: stay silent.
     if not mode:
         return
 
     mode = normalize_ai_mode_name(mode)
 
     if mode not in AI_FILTERS:
-        await message.reply_text(
-            "Unknown AI photo mode.\n\n" + available_ai_photo_commands_text()
-        )
+        await message.reply_text("Unknown AI photo mode.\n\n" + available_ai_photo_commands_text())
         context.user_data.pop("ai_photo_mode", None)
         return
 
@@ -514,7 +503,6 @@ async def ai_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         input_bytes.seek(0)
 
         img = Image.open(input_bytes)
-
         edited = AI_FILTERS[mode](img)
 
         filename = f"{mode}.jpg"
@@ -526,9 +514,7 @@ async def ai_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     except Exception as error:
-        await message.reply_text(
-            f"AI-style photo processing failed.\n\nError: {error}"
-        )
+        await message.reply_text(f"AI-style photo processing failed.\n\nError: {error}")
 
     finally:
         context.user_data.pop("ai_photo_mode", None)

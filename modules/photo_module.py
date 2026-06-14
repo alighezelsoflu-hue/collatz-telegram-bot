@@ -13,17 +13,13 @@ from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 
-# ------------------------------------------------------------
-# Settings
-# ------------------------------------------------------------
-
 MAX_TELEGRAM_SIZE = 1600
 PROFILE_SIZE = 1080
 STICKER_SIZE = 512
 
 
 # ------------------------------------------------------------
-# General helpers
+# Helpers
 # ------------------------------------------------------------
 
 def resize_for_telegram(img: Image.Image, max_size: int = MAX_TELEGRAM_SIZE) -> Image.Image:
@@ -50,7 +46,7 @@ def image_to_bytes(
         output.name = filename or "edited_photo.png"
 
     else:
-        raise ValueError("Unsupported image format. Use JPEG or PNG.")
+        raise ValueError("Unsupported image format.")
 
     output.seek(0)
     return output
@@ -65,17 +61,17 @@ def normalize_caption_command(caption: Optional[str]) -> Optional[str]:
     if not parts:
         return None
 
-    first = parts[0].strip().lower()
+    command = parts[0].strip().lower()
 
-    if not first.startswith("/"):
+    if not command.startswith("/"):
         return None
 
-    first = first[1:]
+    command = command[1:]
 
-    if "@" in first:
-        first = first.split("@", 1)[0]
+    if "@" in command:
+        command = command.split("@", 1)[0]
 
-    return first
+    return command
 
 
 def crop_center_square(img: Image.Image) -> Image.Image:
@@ -84,10 +80,8 @@ def crop_center_square(img: Image.Image) -> Image.Image:
 
     left = (width - side) // 2
     top = (height - side) // 2
-    right = left + side
-    bottom = top + side
 
-    return img.crop((left, top, right, bottom))
+    return img.crop((left, top, left + side, top + side))
 
 
 def estimate_brightness(img: Image.Image) -> float:
@@ -102,6 +96,12 @@ def safe_autocontrast(img: Image.Image, cutoff: int = 1) -> Image.Image:
 
 def safe_sharpen(img: Image.Image, factor: float = 1.20) -> Image.Image:
     return ImageEnhance.Sharpness(img).enhance(factor)
+
+
+def soft_denoise(img: Image.Image) -> Image.Image:
+    img = img.convert("RGB")
+    smoothed = img.filter(ImageFilter.MedianFilter(size=3))
+    return Image.blend(img, smoothed, 0.16)
 
 
 def add_vignette(img: Image.Image, strength: float = 0.45) -> Image.Image:
@@ -128,52 +128,15 @@ def add_vignette(img: Image.Image, strength: float = 0.45) -> Image.Image:
     return Image.composite(img, dark, mask)
 
 
-def add_soft_border(img: Image.Image, border_size: int = 18) -> Image.Image:
-    img = img.convert("RGB")
-    bordered = ImageOps.expand(img, border=border_size, fill="white")
-    bordered = ImageOps.expand(bordered, border=2, fill="#dddddd")
-    return bordered
-
-
-def add_sticker_border(img: Image.Image, border_size: int = 24, shadow_offset: int = 12) -> Image.Image:
-    img = img.convert("RGBA")
-
-    bordered = Image.new(
-        "RGBA",
-        (img.width + border_size * 2, img.height + border_size * 2),
-        (255, 255, 255, 255),
-    )
-    bordered.paste(img, (border_size, border_size), img)
-
-    final_img = Image.new(
-        "RGBA",
-        (bordered.width + shadow_offset, bordered.height + shadow_offset),
-        (0, 0, 0, 0),
-    )
-
-    shadow = Image.new("RGBA", bordered.size, (0, 0, 0, 85))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=7))
-
-    final_img.paste(shadow, (shadow_offset, shadow_offset), shadow)
-    final_img.paste(bordered, (0, 0), bordered)
-
-    return final_img
-
-
-def soft_denoise(img: Image.Image) -> Image.Image:
-    img = img.convert("RGB")
-    smoothed = img.filter(ImageFilter.MedianFilter(size=3))
-    return Image.blend(img, smoothed, 0.18)
-
-
 def professional_base_enhance(img: Image.Image) -> Image.Image:
+    img = resize_for_telegram(img)
     img = img.convert("RGB")
     img = safe_autocontrast(img, cutoff=1)
 
     brightness = estimate_brightness(img)
 
     if brightness < 95:
-        img = ImageEnhance.Brightness(img).enhance(1.14)
+        img = ImageEnhance.Brightness(img).enhance(1.15)
     elif brightness < 120:
         img = ImageEnhance.Brightness(img).enhance(1.07)
     elif brightness > 205:
@@ -182,22 +145,46 @@ def professional_base_enhance(img: Image.Image) -> Image.Image:
     img = ImageEnhance.Contrast(img).enhance(1.13)
     img = ImageEnhance.Color(img).enhance(1.08)
     img = soft_denoise(img)
-    img = safe_sharpen(img, 1.18)
+    img = safe_sharpen(img, 1.20)
 
     return img
 
 
+def make_edge_mask(img: Image.Image, threshold: int = 70) -> Image.Image:
+    gray = ImageOps.grayscale(img.convert("RGB"))
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageOps.autocontrast(edges)
+    edges = edges.filter(ImageFilter.MedianFilter(size=3))
+    edges = edges.point(lambda p: 255 if p > threshold else 0)
+    edges = ImageOps.invert(edges)
+    return edges.convert("RGB")
+
+
+def center_subject_mask(width: int, height: int, blur_radius: int = 60) -> Image.Image:
+    mask = Image.new("L", (width, height), 0)
+
+    center_w = int(width * 0.58)
+    center_h = int(height * 0.74)
+
+    left = (width - center_w) // 2
+    top = (height - center_h) // 2
+
+    center = Image.new("L", (center_w, center_h), 255)
+    center = center.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+    mask.paste(center, (left, top))
+    return mask
+
+
 # ------------------------------------------------------------
-# Filters
+# Normal photo filters
 # ------------------------------------------------------------
 
 def apply_enhance_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     return professional_base_enhance(img)
 
 
 def apply_vintage_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     img = professional_base_enhance(img)
 
     img = ImageEnhance.Color(img).enhance(0.65)
@@ -218,22 +205,20 @@ def apply_vintage_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_bw_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     img = professional_base_enhance(img)
 
     gray = ImageOps.grayscale(img)
     gray = ImageOps.autocontrast(gray, cutoff=1)
     gray = ImageEnhance.Contrast(gray).enhance(1.30)
-    gray = ImageEnhance.Sharpness(gray).enhance(1.16)
+    gray = ImageEnhance.Sharpness(gray).enhance(1.18)
 
     return gray.convert("RGB")
 
 
 def apply_cinematic_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     img = professional_base_enhance(img)
 
-    img = ImageEnhance.Contrast(img).enhance(1.23)
+    img = ImageEnhance.Contrast(img).enhance(1.24)
     img = ImageEnhance.Color(img).enhance(0.95)
 
     teal = Image.new("RGB", img.size, "#244f5f")
@@ -249,9 +234,8 @@ def apply_cinematic_filter(img: Image.Image) -> Image.Image:
 
 
 def apply_clean_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
+    img = resize_for_telegram(img).convert("RGB")
 
-    img = img.convert("RGB")
     img = ImageOps.autocontrast(img, cutoff=2)
     img = ImageEnhance.Brightness(img).enhance(1.04)
     img = ImageEnhance.Contrast(img).enhance(1.28)
@@ -270,13 +254,81 @@ def apply_profile_filter(img: Image.Image) -> Image.Image:
     img = professional_base_enhance(img)
     img = ImageEnhance.Contrast(img).enhance(1.06)
     img = ImageEnhance.Color(img).enhance(1.05)
-    img = safe_sharpen(img, 1.16)
 
     return img
 
 
+def apply_cartoon_filter(img: Image.Image) -> Image.Image:
+    img = resize_for_telegram(img).convert("RGB")
+
+    base = img.filter(ImageFilter.MedianFilter(size=5))
+    base = base.filter(ImageFilter.SMOOTH_MORE)
+    base = ImageEnhance.Color(base).enhance(1.55)
+    base = ImageEnhance.Contrast(base).enhance(1.20)
+    base = ImageEnhance.Brightness(base).enhance(1.03)
+    base = ImageOps.posterize(base, bits=4)
+
+    edges = make_edge_mask(img, threshold=65)
+
+    result = ImageChops.multiply(base, edges)
+    result = safe_sharpen(result, 1.45)
+
+    return result
+
+
+def apply_caricature_filter(img: Image.Image) -> Image.Image:
+    img = resize_for_telegram(img).convert("RGB")
+
+    base = img.filter(ImageFilter.SMOOTH_MORE)
+    base = base.filter(ImageFilter.SMOOTH_MORE)
+    base = ImageEnhance.Color(base).enhance(1.85)
+    base = ImageEnhance.Contrast(base).enhance(1.34)
+    base = ImageEnhance.Brightness(base).enhance(1.04)
+    base = ImageOps.posterize(base, bits=3)
+
+    edges = make_edge_mask(img, threshold=72)
+
+    result = ImageChops.multiply(base, edges)
+    result = safe_sharpen(result, 1.70)
+
+    return result
+
+
+def apply_sticker_filter(img: Image.Image) -> Image.Image:
+    img = img.convert("RGBA")
+    img = crop_center_square(img)
+    img = resize_for_telegram(img, max_size=STICKER_SIZE)
+
+    rgb = img.convert("RGB")
+    rgb = professional_base_enhance(rgb)
+    rgba = rgb.convert("RGBA")
+
+    border_size = 24
+    shadow_offset = 12
+
+    bordered = Image.new(
+        "RGBA",
+        (rgba.width + border_size * 2, rgba.height + border_size * 2),
+        (255, 255, 255, 255),
+    )
+    bordered.paste(rgba, (border_size, border_size), rgba)
+
+    final_img = Image.new(
+        "RGBA",
+        (bordered.width + shadow_offset, bordered.height + shadow_offset),
+        (0, 0, 0, 0),
+    )
+
+    shadow = Image.new("RGBA", bordered.size, (0, 0, 0, 85))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=7))
+
+    final_img.paste(shadow, (shadow_offset, shadow_offset), shadow)
+    final_img.paste(bordered, (0, 0), bordered)
+
+    return final_img
+
+
 def apply_beach_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     img = professional_base_enhance(img)
 
     img = ImageEnhance.Brightness(img).enhance(1.08)
@@ -288,103 +340,26 @@ def apply_beach_filter(img: Image.Image) -> Image.Image:
 
     img = Image.blend(img, warm, 0.10)
     img = Image.blend(img, sky, 0.035)
-    img = safe_sharpen(img, 1.10)
 
-    return img
-
-
-def apply_cartoon_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
-    img = img.convert("RGB")
-
-    base = img.filter(ImageFilter.MedianFilter(size=5))
-    base = base.filter(ImageFilter.SMOOTH_MORE)
-    base = ImageEnhance.Color(base).enhance(1.55)
-    base = ImageEnhance.Contrast(base).enhance(1.20)
-    base = ImageEnhance.Brightness(base).enhance(1.03)
-    base = ImageOps.posterize(base, bits=4)
-
-    gray = ImageOps.grayscale(img)
-    edges = gray.filter(ImageFilter.FIND_EDGES)
-    edges = ImageOps.autocontrast(edges)
-    edges = edges.filter(ImageFilter.MedianFilter(size=3))
-    edges = edges.point(lambda p: 255 if p > 64 else 0)
-    edges = ImageOps.invert(edges)
-
-    cartoon = ImageChops.multiply(base, edges.convert("RGB"))
-    cartoon = safe_sharpen(cartoon, 1.45)
-
-    return cartoon
-
-
-def apply_caricature_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
-    img = img.convert("RGB")
-
-    base = img.filter(ImageFilter.SMOOTH_MORE)
-    base = base.filter(ImageFilter.SMOOTH_MORE)
-    base = ImageEnhance.Color(base).enhance(1.85)
-    base = ImageEnhance.Contrast(base).enhance(1.34)
-    base = ImageEnhance.Brightness(base).enhance(1.04)
-    base = ImageOps.posterize(base, bits=3)
-
-    gray = ImageOps.grayscale(img)
-    edges = gray.filter(ImageFilter.FIND_EDGES)
-    edges = ImageOps.autocontrast(edges)
-    edges = edges.filter(ImageFilter.MedianFilter(size=3))
-    edges = edges.point(lambda p: 255 if p > 72 else 0)
-    edges = ImageOps.invert(edges)
-
-    caricature = ImageChops.multiply(base, edges.convert("RGB"))
-    caricature = safe_sharpen(caricature, 1.70)
-
-    return caricature
-
-
-def apply_sticker_filter(img: Image.Image) -> Image.Image:
-    img = img.convert("RGBA")
-    img = crop_center_square(img)
-    img = resize_for_telegram(img, max_size=STICKER_SIZE)
-
-    rgb = img.convert("RGB")
-    rgb = professional_base_enhance(rgb)
-    rgb = ImageEnhance.Color(rgb).enhance(1.18)
-    rgb = ImageEnhance.Contrast(rgb).enhance(1.10)
-    rgb = safe_sharpen(rgb, 1.18)
-
-    rgba = rgb.convert("RGBA")
-    return add_sticker_border(rgba)
+    return safe_sharpen(img, 1.10)
 
 
 def apply_portrait_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
-    img = img.convert("RGB")
-
-    sharp = professional_base_enhance(img)
-    blurred = img.filter(ImageFilter.GaussianBlur(radius=5))
-
+    img = professional_base_enhance(img)
     width, height = img.size
-    mask = Image.new("L", (width, height), 0)
 
-    center_w = int(width * 0.58)
-    center_h = int(height * 0.72)
-    left = (width - center_w) // 2
-    top = (height - center_h) // 2
-    right = left + center_w
-    bottom = top + center_h
+    background = img.filter(ImageFilter.GaussianBlur(radius=7))
+    foreground = safe_sharpen(img, 1.20)
 
-    center_mask = Image.new("L", (center_w, center_h), 255)
-    center_mask = center_mask.filter(ImageFilter.GaussianBlur(radius=45))
-    mask.paste(center_mask, (left, top))
+    mask = center_subject_mask(width, height, blur_radius=60)
 
-    portrait = Image.composite(sharp, blurred, mask)
-    portrait = add_vignette(portrait, strength=0.48)
+    result = Image.composite(foreground, background, mask)
+    result = add_vignette(result, strength=0.50)
 
-    return portrait
+    return result
 
 
 def apply_soft_filter(img: Image.Image) -> Image.Image:
-    img = resize_for_telegram(img)
     img = professional_base_enhance(img)
 
     soft = img.filter(ImageFilter.GaussianBlur(radius=1.2))
@@ -448,25 +423,52 @@ MODE_ALIASES = {
     "b&w": "bw",
     "mono": "bw",
     "monochrome": "bw",
-
     "summer": "beach",
     "vacation": "beach",
-
     "stiker": "sticker",
-
     "caricator": "caricature",
     "funny": "caricature",
-
     "photo_info": "photoinfo",
     "info": "photoinfo",
-
     "auto": "enhance",
     "improve": "enhance",
-
     "document": "clean",
     "scan": "clean",
-
     "cinema": "cinematic",
+}
+
+
+PHOTO_FILTERS: Dict[str, Callable[[Image.Image], Image.Image]] = {
+    "enhance": apply_enhance_filter,
+    "vintage": apply_vintage_filter,
+    "bw": apply_bw_filter,
+    "cinematic": apply_cinematic_filter,
+    "clean": apply_clean_filter,
+    "profile": apply_profile_filter,
+    "cartoon": apply_cartoon_filter,
+    "caricature": apply_caricature_filter,
+    "sticker": apply_sticker_filter,
+    "beach": apply_beach_filter,
+    "portrait": apply_portrait_filter,
+    "soft": apply_soft_filter,
+    "hdr": apply_hdr_filter,
+}
+
+
+PHOTO_CAPTIONS = {
+    "enhance": "Your enhanced photo is ready ✨",
+    "vintage": "Your vintage photo is ready 📸",
+    "bw": "Your black-and-white photo is ready 🖤",
+    "cinematic": "Your cinematic photo is ready 🎬",
+    "clean": "Your cleaned photo is ready 🧼",
+    "profile": "Your profile-style photo is ready 👤",
+    "cartoon": "Your cartoon photo is ready 🎨",
+    "caricature": "Your caricature photo is ready 😄",
+    "sticker": "Your sticker-style image is ready 🖼️",
+    "beach": "Your beach photo is ready 🌴",
+    "portrait": "Your portrait-style photo is ready 👔",
+    "soft": "Your soft-style photo is ready 🌙",
+    "hdr": "Your HDR-style photo is ready 🔆",
 }
 
 
@@ -501,7 +503,9 @@ async def set_photo_mode(update: Update, context: ContextTypes.DEFAULT_TYPE, mod
         return
 
     mode = normalize_mode_name(mode)
+
     context.user_data["photo_mode"] = mode
+    context.user_data.pop("ai_photo_mode", None)
 
     await update.message.reply_text(
         PHOTO_MODE_MESSAGES.get(mode, "Mode selected. Now send me a photo.")
@@ -580,46 +584,14 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     context.user_data.pop("photo_mode", None)
+    context.user_data.pop("ai_photo_mode", None)
+
     await update.message.reply_text("Cancelled.\n\n" + available_photo_commands_text())
 
 
 # ------------------------------------------------------------
-# Processing
+# Photo handler
 # ------------------------------------------------------------
-
-PHOTO_FILTERS: Dict[str, Callable[[Image.Image], Image.Image]] = {
-    "enhance": apply_enhance_filter,
-    "vintage": apply_vintage_filter,
-    "bw": apply_bw_filter,
-    "cinematic": apply_cinematic_filter,
-    "clean": apply_clean_filter,
-    "profile": apply_profile_filter,
-    "cartoon": apply_cartoon_filter,
-    "caricature": apply_caricature_filter,
-    "sticker": apply_sticker_filter,
-    "beach": apply_beach_filter,
-    "portrait": apply_portrait_filter,
-    "soft": apply_soft_filter,
-    "hdr": apply_hdr_filter,
-}
-
-
-PHOTO_CAPTIONS = {
-    "enhance": "Your enhanced photo is ready ✨",
-    "vintage": "Your vintage photo is ready 📸",
-    "bw": "Your black-and-white photo is ready 🖤",
-    "cinematic": "Your cinematic photo is ready 🎬",
-    "clean": "Your cleaned photo is ready 🧼",
-    "profile": "Your profile-style photo is ready 👤",
-    "cartoon": "Your cartoon photo is ready 🎨",
-    "caricature": "Your caricature photo is ready 😄",
-    "sticker": "Your sticker-style image is ready 🖼️",
-    "beach": "Your beach photo is ready 🌴",
-    "portrait": "Your portrait-style photo is ready 👔",
-    "soft": "Your soft-style photo is ready 🌙",
-    "hdr": "Your HDR-style photo is ready 🔆",
-}
-
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
@@ -627,7 +599,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not message or not message.photo:
         return
 
-    mode = context.user_data.get("photo_mode")
     ai_mode = context.user_data.get("ai_photo_mode")
     caption_command = normalize_caption_command(message.caption)
 
@@ -635,16 +606,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if ai_mode:
         return
 
-    # If the photo caption itself is an AI command like /ai_enhance,
-    # let ai_photo_module.py handle it.
+    # If caption is /ai_something, let ai_photo_module.py handle it.
     if caption_command and caption_command.startswith("ai_"):
         return
 
-    # If user sent a normal photo command in caption, use it.
+    mode = context.user_data.get("photo_mode")
+
     if caption_command:
         mode = normalize_mode_name(caption_command)
 
-    # If no normal photo mode is selected, stay silent.
+    # Normal random photo in group/private chat: stay silent.
     if not mode:
         return
 
@@ -667,9 +638,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
 
         if mode not in PHOTO_FILTERS:
-            await message.reply_text(
-                "Unknown photo mode.\n\n" + available_photo_commands_text()
-            )
+            await message.reply_text("Unknown photo mode.\n\n" + available_photo_commands_text())
             return
 
         edited = PHOTO_FILTERS[mode](img)
@@ -693,9 +662,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
 
     except Exception as error:
-        await message.reply_text(
-            f"Sorry, I could not process that photo.\n\nError: {error}"
-        )
+        await message.reply_text(f"Sorry, I could not process that photo.\n\nError: {error}")
 
     finally:
         context.user_data.pop("photo_mode", None)

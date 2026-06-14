@@ -14,16 +14,9 @@ from config import (
 
 from modules.math_module import register_math_handlers
 from modules.photo_module import register_photo_handlers
+from modules.ai_photo_module import register_ai_photo_handlers
 from modules.news_module import register_news_handlers
 from modules.fifa_module import register_fifa_handlers
-
-# Optional AI photo module.
-# If you created modules/ai_photo_module.py, this will load it.
-# If not, the bot still works normally.
-try:
-    from modules.ai_photo_module import register_ai_photo_handlers
-except Exception:
-    register_ai_photo_handlers = None
 
 
 if not TOKEN:
@@ -35,7 +28,7 @@ api = FastAPI(title="LakLak Multi Tool Telegram Bot")
 
 
 # ------------------------------------------------------------
-# Telegram commands
+# Start/help
 # ------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -51,17 +44,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/fib 20 - calculate Fibonacci number F(20)\n"
         "/fibonacci 20 - same as /fib\n"
         "/fiblist 30 - send the first 30 Fibonacci numbers as a text file\n"
-        "/stats 4 7 9 10 10 - calculate mean, median, mode, variance, std dev, quartiles\n"
-        "/statistics 4 7 9 10 10 - same as /stats\n"
-        "/statsfile 4 7 9 10 10 - send a complete statistics report as a text file\n"
+        "/stats 4 7 9 10 10 - calculate statistics\n"
+        "/statsfile 4 7 9 10 10 - send complete statistics report as a text file\n"
         "/calc sin(pi / 2) - scientific calculator\n"
-        "/calc log(100, 10) - logarithm calculator\n"
-        "/calc sqrt(144) - square root calculator\n"
         "/pi - show pi number\n"
         "/e - show Euler's number\n"
         "/mathhelp - show calculator examples\n\n"
 
-        "Photos:\n"
+        "Photo tools:\n"
         "/enhance - improve brightness, contrast, color, and sharpness\n"
         "/vintage - vintage photo effect\n"
         "/bw - black and white photo\n"
@@ -72,18 +62,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/caricature - stronger caricature style\n"
         "/sticker - sticker-style PNG\n"
         "/beach - summer/beach filter\n"
-        "/photoinfo - show photo information\n\n"
+        "/portrait - soft portrait focus effect\n"
+        "/soft - soft dreamy filter\n"
+        "/hdr - strong detail and contrast\n"
+        "/photoinfo - show photo information\n"
+        "/photohelp - show photo commands\n\n"
 
-        "AI Photos:\n"
-        "/ai_enhance - AI photo enhancement\n"
-        "/ai_portrait - AI portrait style\n"
-        "/ai_cartoon - AI cartoon style\n"
-        "/ai_anime - AI anime style\n"
-        "/ai_studio - AI studio photo style\n"
-        "/ai_background - AI background improvement\n"
-        "/ai_magic - AI artistic transformation\n"
-        "/ai_prompt your custom instruction - save custom AI prompt\n"
-        "/ai_reset - reset AI photo mode and prompt\n\n"
+        "Free AI-style photo tools:\n"
+        "/ai_enhance - local AI-style photo enhancement\n"
+        "/ai_portrait - portrait look with soft background\n"
+        "/ai_cartoon - cartoon style\n"
+        "/ai_anime - anime-inspired style\n"
+        "/ai_studio - studio portrait look\n"
+        "/ai_background - blur and improve background style\n"
+        "/ai_bg - same as /ai_background\n"
+        "/ai_magic - colorful artistic transformation\n"
+        "/ai_profile - square profile-style AI enhancement\n"
+        "/ai_avatar - same as /ai_profile\n"
+        "/ai_photohelp - show AI photo commands\n"
+        "/ai_reset - reset AI photo mode\n\n"
 
         "World Cup 2026:\n"
         "/wc_today - today's matches in EU and Iran time\n"
@@ -136,16 +133,23 @@ async def setup_bot_commands() -> None:
         BotCommand("caricature", "Caricature photo effect"),
         BotCommand("sticker", "Sticker style image"),
         BotCommand("beach", "Summer beach photo effect"),
+        BotCommand("portrait", "Portrait photo effect"),
+        BotCommand("soft", "Soft photo effect"),
+        BotCommand("hdr", "HDR photo effect"),
         BotCommand("photoinfo", "Show photo information"),
+        BotCommand("photohelp", "Show photo commands"),
 
-        BotCommand("ai_enhance", "AI photo enhancement"),
-        BotCommand("ai_portrait", "AI portrait style"),
-        BotCommand("ai_cartoon", "AI cartoon style"),
-        BotCommand("ai_anime", "AI anime style"),
-        BotCommand("ai_studio", "AI studio photo style"),
-        BotCommand("ai_background", "AI background improvement"),
-        BotCommand("ai_magic", "AI artistic transformation"),
-        BotCommand("ai_prompt", "Save custom AI photo prompt"),
+        BotCommand("ai_enhance", "Free AI-style enhance"),
+        BotCommand("ai_portrait", "Free AI-style portrait"),
+        BotCommand("ai_cartoon", "Free AI-style cartoon"),
+        BotCommand("ai_anime", "Free AI-style anime"),
+        BotCommand("ai_studio", "Free AI-style studio"),
+        BotCommand("ai_background", "Free AI-style background"),
+        BotCommand("ai_bg", "Free AI-style background"),
+        BotCommand("ai_magic", "Free AI-style magic"),
+        BotCommand("ai_profile", "Free AI-style profile"),
+        BotCommand("ai_avatar", "Free AI-style avatar"),
+        BotCommand("ai_photohelp", "Show AI photo commands"),
         BotCommand("ai_reset", "Reset AI photo mode"),
 
         BotCommand("wc_today", "World Cup matches today"),
@@ -164,7 +168,7 @@ async def setup_bot_commands() -> None:
 
 
 # ------------------------------------------------------------
-# Handler registration
+# Register handlers
 # ------------------------------------------------------------
 
 def register_handlers() -> None:
@@ -175,10 +179,13 @@ def register_handlers() -> None:
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
 
+    # Normal photo handler group=1, AI photo handler group=2.
+    # Normal photo handler ignores ai_ modes, so AI photo handler can process them.
     register_photo_handlers(telegram_app)
+    register_ai_photo_handlers(telegram_app)
 
-    if register_ai_photo_handlers is not None:
-        register_ai_photo_handlers(telegram_app)
+
+register_handlers()
 
 
 # ------------------------------------------------------------
@@ -227,8 +234,6 @@ async def root():
             "/stats 4, pi, sin(pi / 2), log(100, 10)",
             "/statsfile 4 7 9 10 10",
             "/calc sin(pi / 2)",
-            "/calc log(100, 10)",
-            "/calc sqrt(144)",
             "/pi",
             "/e",
             "/mathhelp",
@@ -243,7 +248,11 @@ async def root():
             "/caricature",
             "/sticker",
             "/beach",
+            "/portrait",
+            "/soft",
+            "/hdr",
             "/photoinfo",
+            "/photohelp",
 
             "/ai_enhance",
             "/ai_portrait",
@@ -251,8 +260,11 @@ async def root():
             "/ai_anime",
             "/ai_studio",
             "/ai_background",
+            "/ai_bg",
             "/ai_magic",
-            "/ai_prompt",
+            "/ai_profile",
+            "/ai_avatar",
+            "/ai_photohelp",
             "/ai_reset",
 
             "/wc_today",
@@ -269,7 +281,7 @@ async def root():
         "modules": {
             "math": True,
             "photo": True,
-            "ai_photo": register_ai_photo_handlers is not None,
+            "ai_photo_free_local": True,
             "news": True,
             "fifa": True,
         },
