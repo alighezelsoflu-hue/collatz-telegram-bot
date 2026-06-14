@@ -485,9 +485,12 @@ async def ai_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     mode = context.user_data.get("ai_photo_mode")
     caption_command = normalize_caption_command(message.caption)
 
+    # If photo caption contains an AI command like /ai_enhance,
+    # use that directly.
     if caption_command and caption_command.startswith("ai_"):
         mode = normalize_ai_mode_name(caption_command)
 
+    # If no AI mode is selected, do nothing.
     if not mode:
         return
 
@@ -551,4 +554,4 @@ def register_ai_photo_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("ai_reset", ai_reset_command))
     app.add_handler(CommandHandler("ai_photohelp", ai_photohelp_command))
 
-    app.add_handler(MessageHandler(filters.PHOTO, ai_photo_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, ai_photo_handler), group=2)

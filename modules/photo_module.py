@@ -628,16 +628,24 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     mode = context.user_data.get("photo_mode")
+    ai_mode = context.user_data.get("ai_photo_mode")
     caption_command = normalize_caption_command(message.caption)
 
+    # If AI mode is active, let ai_photo_module.py handle the photo.
+    if ai_mode:
+        return
+
+    # If the photo caption itself is an AI command like /ai_enhance,
+    # let ai_photo_module.py handle it.
+    if caption_command and caption_command.startswith("ai_"):
+        return
+
+    # If user sent a normal photo command in caption, use it.
     if caption_command:
         mode = normalize_mode_name(caption_command)
 
+    # If no normal photo mode is selected, stay silent.
     if not mode:
-        # Important:
-        # Do nothing when users send normal photos in groups/channels.
-        # The bot should only react after a command like /enhance,
-        # or when the photo caption contains a command like /enhance.
         return
 
     mode = normalize_mode_name(mode)
