@@ -634,9 +634,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         mode = normalize_mode_name(caption_command)
 
     if not mode:
-        await message.reply_text(
-            "Please choose a photo mode first.\n\n" + available_photo_commands_text()
-        )
+        # Important:
+        # Do nothing when users send normal photos in groups/channels.
+        # The bot should only react after a command like /enhance,
+        # or when the photo caption contains a command like /enhance.
         return
 
     mode = normalize_mode_name(mode)
@@ -719,4 +720,4 @@ def register_photo_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("photohelp", photohelp_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler), group=1)

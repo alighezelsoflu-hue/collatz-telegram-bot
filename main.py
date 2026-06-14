@@ -174,15 +174,11 @@ def register_handlers() -> None:
     register_math_handlers(telegram_app)
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
+
     register_photo_handlers(telegram_app)
 
     if register_ai_photo_handlers is not None:
         register_ai_photo_handlers(telegram_app)
-
-    register_photo_handlers(telegram_app)
-
-
-register_handlers()
 
 
 # ------------------------------------------------------------
