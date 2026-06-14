@@ -17,7 +17,7 @@ from modules.photo_module import register_photo_handlers
 from modules.ai_photo_module import register_ai_photo_handlers
 from modules.news_module import register_news_handlers
 from modules.fifa_module import register_fifa_handlers
-
+from modules.group_activity_module import register_group_activity_handlers
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -93,6 +93,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/trump - latest Trump-related news with detailed English and Farsi report\n"
         "/trumpfile - send detailed Trump-related news as a text file\n\n"
 
+        "Group activity:\n"
+        "/activity_today - show today's group activity report\n"
+        "/activity_week - show last 7 days group activity report\n"
+        "/leaderboard - show most active members\n"
+        "/activity_chart - send leaderboard chart as image\n"
+        "/awards - fun weekly group awards\n\n"
+
         "/cancel - cancel current photo mode\n\n"
         "Tip: type / to see the command menu."
     )
@@ -110,6 +117,12 @@ async def setup_bot_commands() -> None:
     commands = [
         BotCommand("start", "Show main menu"),
         BotCommand("help", "Show help menu"),
+
+        BotCommand("activity_today", "Today group activity report"),
+        BotCommand("activity_week", "Weekly group activity report"),
+        BotCommand("leaderboard", "Most active members"),
+        BotCommand("activity_chart", "Group activity chart"),
+        BotCommand("awards", "Weekly group awards"),
 
         BotCommand("collatz", "Calculate Collatz sequence"),
         BotCommand("fib", "Calculate Fibonacci number"),
@@ -183,6 +196,8 @@ def register_handlers() -> None:
     # Normal photo handler ignores ai_ modes, so AI photo handler can process them.
     register_photo_handlers(telegram_app)
     register_ai_photo_handlers(telegram_app)
+
+    register_group_activity_handlers(telegram_app)
 
 
 register_handlers()
