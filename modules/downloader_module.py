@@ -167,13 +167,17 @@ def build_video_options(download_dir: Path) -> dict:
 
     options.update(
         {
+            # X/Twitter formats are inconsistent.
+            # Try Telegram-friendly combined MP4 first.
+            # Then fall back to any MP4.
+            # Then fall back to any available video.
             "format": (
-                "best[ext=mp4][acodec!=none][vcodec!=none][filesize<45M]/"
-                "best[acodec!=none][vcodec!=none][filesize<45M]/"
-                "best[ext=mp4][acodec!=none][vcodec!=none]/"
-                "best[acodec!=none][vcodec!=none]/"
-                "worst[ext=mp4][acodec!=none][vcodec!=none]/"
-                "worst[acodec!=none][vcodec!=none]"
+                "best[ext=mp4][filesize<45M]/"
+                "best[filesize<45M]/"
+                "best[ext=mp4]/"
+                "best/"
+                "worst[ext=mp4]/"
+                "worst"
             ),
             "merge_output_format": "mp4",
         }
@@ -212,11 +216,18 @@ def clean_error_message(error: Exception, mode: str, url: str) -> str:
     if "Requested format is not available" in error_text:
         if mode == "video":
             return (
-                "Video format was not available in a Telegram-friendly file.\n\n"
-                "Try /audio with the same link."
+                "No downloadable video format was found for this X/Twitter post.\n\n"
+                "Possible reasons:\n"
+                "- The post has no video\n"
+                "- The video is protected or restricted\n"
+                "- X/Twitter blocked the request\n\n"
+                "Try another X/Twitter video link."
             )
 
-        return "Audio format was not available for this X/Twitter link."
+        return (
+            "Audio format was not available for this X/Twitter link.\n\n"
+            "Try /dl with the same link instead."
+        )
 
     if "Private video" in error_text or "private" in error_text.lower():
         return "This X/Twitter post is private or restricted."
