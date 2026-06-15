@@ -1,4 +1,4 @@
-# LakLak Modular Telegram Bot
+# Modular Telegram Bot
 
 Project structure:
 

@@ -18,6 +18,7 @@ from modules.ai_photo_module import register_ai_photo_handlers
 from modules.news_module import register_news_handlers
 from modules.fifa_module import register_fifa_handlers
 from modules.group_activity_module import register_group_activity_handlers
+from modules.downloader_module import register_downloader_handlers
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -102,6 +103,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/activity_chart - send leaderboard chart as image\n"
         "/awards - fun weekly group awards\n\n"
 
+        "Downloader:\n"
+        "/download <link> - download public video from YouTube, Instagram, X/Twitter, TikTok\n"
+        "/dl <link> - same as /download\n"
+        "/audio <link> - download audio only\n"
+        "/mp3 <link> - same as /audio\n"
+        "/downloader_help - show downloader help\n\n"
+
         "/cancel - cancel current photo mode\n\n"
         "Tip: type / to see the command menu."
     )
@@ -175,6 +183,12 @@ async def setup_bot_commands() -> None:
         BotCommand("wc_group", "World Cup group standings"),
         BotCommand("wc_standings", "All World Cup standings"),
 
+        BotCommand("download", "Download public video link"),
+        BotCommand("dl", "Download public video link"),
+        BotCommand("audio", "Download audio only"),
+        BotCommand("mp3", "Download audio only"),
+        BotCommand("downloader_help", "Downloader help"),
+
         BotCommand("trump", "Latest Trump news summary"),
         BotCommand("trumpfile", "Trump news report file"),
 
@@ -195,14 +209,14 @@ def register_handlers() -> None:
     register_math_handlers(telegram_app)
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
+    register_downloader_handlers(telegram_app)
 
     # Normal photo handler group=1, AI photo handler group=2.
     # Normal photo handler ignores ai_ modes, so AI photo handler can process them.
     register_photo_handlers(telegram_app)
     register_ai_photo_handlers(telegram_app)
-
     register_group_activity_handlers(telegram_app)
-
+    
 
 register_handlers()
 
@@ -303,6 +317,7 @@ async def root():
             "ai_photo_free_local": True,
             "news": True,
             "fifa": True,
+            "downloader": True,
         },
         "football_provider": "football-data.org",
         "world_cup_competition": WORLD_CUP_COMPETITION,
