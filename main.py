@@ -19,7 +19,7 @@ from modules.news_module import register_news_handlers
 from modules.fifa_module import register_fifa_handlers
 from modules.group_activity_module import register_group_activity_handlers
 from modules.downloader_module import register_downloader_handlers
-
+from modules.birthday_module import register_birthday_handlers
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -112,6 +112,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/mp3 <link> - same as /audio\n"
         "/downloader_help - show downloader help\n\n"
 
+        "Birthdays:\n"
+        "/add_birthday Ali 1990-05-12 - save birthday with year\n"
+        "/add_birthday Sara 12-05 - save birthday without year\n"
+        "/birthdays - show all saved birthdays\n"
+        "/next_birthday - show upcoming birthdays\n"
+        "/birthday_today - show today's birthdays\n"
+        "/remove_birthday Ali - remove a birthday\n"
+        "/birthday_help - show birthday help\n\n"
+
         "/cancel - cancel current photo mode\n\n"
         "Tip: type / to see the command menu."
     )
@@ -194,6 +203,13 @@ async def setup_bot_commands() -> None:
         BotCommand("trump", "Latest Trump news summary"),
         BotCommand("trumpfile", "Trump news report file"),
 
+        BotCommand("add_birthday", "Add a birthday"),
+        BotCommand("birthdays", "Show all birthdays"),
+        BotCommand("next_birthday", "Show next birthdays"),
+        BotCommand("birthday_today", "Show birthdays today"),
+        BotCommand("remove_birthday", "Remove a birthday"),
+        BotCommand("birthday_help", "Birthday help"),
+
         BotCommand("cancel", "Cancel current photo mode"),
     ]
 
@@ -212,9 +228,8 @@ def register_handlers() -> None:
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
     register_downloader_handlers(telegram_app)
+    register_birthday_handlers(telegram_app)
 
-    # Normal photo handler group=1, AI photo handler group=2.
-    # Normal photo handler ignores ai_ modes, so AI photo handler can process them.
     register_photo_handlers(telegram_app)
     register_ai_photo_handlers(telegram_app)
 
@@ -336,6 +351,7 @@ async def root():
             "fifa": True,
             "group_activity": True,
             "x_twitter_downloader": True,
+            "birthdays": True,
         },
         "downloader": {
             "supported_platforms": ["X/Twitter"],
