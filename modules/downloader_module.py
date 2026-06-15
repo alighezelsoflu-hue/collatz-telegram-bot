@@ -25,6 +25,11 @@ MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_MB * 1024 * 1024
 
 DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("DOWNLOADER_TIMEOUT_SECONDS", "180"))
 
+# Optional cookies file for Instagram/X/Twitter/etc.
+# Example on Render:
+# INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
+
 ALLOWED_DOMAINS = (
     "youtube.com",
     "www.youtube.com",
@@ -45,6 +50,28 @@ ALLOWED_DOMAINS = (
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
+def is_instagram_url(url: str) -> bool:
+    try:
+        host = urlparse(url).netloc.lower()
+        return host == "instagram.com" or host.endswith(".instagram.com")
+    except Exception:
+        return False
+
+
+def get_cookies_file_for_url(url: str) -> Optional[str]:
+    """
+    Uses cookies only for Instagram links when INSTAGRAM_COOKIES_FILE is set.
+    The cookies file must be a Netscape-format cookies.txt file.
+    """
+    if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE:
+        cookies_path = Path(INSTAGRAM_COOKIES_FILE)
+
+        if cookies_path.exists() and cookies_path.is_file():
+            return str(cookies_path)
+
+    return None
+
 
 def downloader_help_text() -> str:
     return (
@@ -128,8 +155,8 @@ def find_downloaded_file(directory: Path) -> Optional[Path]:
     return files[0]
 
 
-def build_video_options(download_dir: Path) -> dict:
-    return {
+def build_video_options(download_dir: Path, url: str) -> dict:
+    options = {
         "outtmpl": str(download_dir / "%(title).80s_%(id)s.%(ext)s"),
         "format": (
             "best[filesize<45M][ext=mp4]/"
@@ -148,11 +175,16 @@ def build_video_options(download_dir: Path) -> dict:
         "restrictfilenames": False,
     }
 
+    cookies_file = get_cookies_file_for_url(url)
 
-def build_audio_options(download_dir: Path) -> dict:
-    # This downloads audio-only. It does not force mp3 conversion,
-    # because mp3 conversion needs ffmpeg on the server.
-    return {
+    if cookies_file:
+        options["cookiefile"] = cookies_file
+
+    return options
+
+
+def build_audio_options(download_dir: Path, url: str) -> dict:
+    options = {
         "outtmpl": str(download_dir / "%(title).80s_%(id)s.%(ext)s"),
         "format": (
             "bestaudio[filesize<45M]/"
@@ -168,6 +200,13 @@ def build_audio_options(download_dir: Path) -> dict:
         "restrictfilenames": False,
     }
 
+    cookies_file = get_cookies_file_for_url(url)
+
+    if cookies_file:
+        options["cookiefile"] = cookies_file
+
+    return options
+
 
 def run_ytdlp_download(url: str, mode: str) -> Tuple[Path, str, str]:
     if yt_dlp is None:
@@ -177,9 +216,9 @@ def run_ytdlp_download(url: str, mode: str) -> Tuple[Path, str, str]:
 
     try:
         if mode == "audio":
-            options = build_audio_options(temp_dir)
+            options = build_audio_options(temp_dir, url)
         else:
-            options = build_video_options(temp_dir)
+            options = build_video_options(temp_dir, url)
 
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -324,15 +363,50 @@ async def handle_download_command(
         )
 
     except Exception as error:
-        await status_message.edit_text(
-            "Download failed.\n\n"
-            f"Error: {error}\n\n"
-            "Possible reasons:\n"
-            "- The post is private\n"
-            "- The video is too large\n"
-            "- The website blocked the request\n"
-            "- The link is not supported by yt-dlp"
-        )
+        error_text = str(error)
+
+        if "Instagram sent an empty media response" in error_text:
+            if INSTAGRAM_COOKIES_FILE:
+                clean_error = (
+                    "Instagram still did not allow this reel to be downloaded.\n\n"
+                    "Cookies file is configured, but possible reasons are:\n"
+                    "- Cookies are expired\n"
+                    "- Cookies file path is wrong\n"
+                    "- The reel is private or restricted\n"
+                    "- Instagram blocked the server request\n\n"
+                    f"Configured cookies path:\n{INSTAGRAM_COOKIES_FILE}"
+                )
+            else:
+                clean_error = (
+                    "Instagram did not allow this reel to be downloaded without login.\n\n"
+                    "To improve Instagram downloads, set this Render environment variable:\n\n"
+                    "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
+                )
+
+        elif "Private video" in error_text or "login" in error_text.lower():
+            clean_error = (
+                "This link needs login or is private/restricted.\n\n"
+                "For Instagram, use a cookies file with:\n"
+                "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
+            )
+
+        elif "File is larger than max-filesize" in error_text or "too large" in error_text.lower():
+            clean_error = (
+                f"This file is too large.\n\n"
+                f"Current limit: {MAX_DOWNLOAD_MB} MB"
+            )
+
+        else:
+            clean_error = (
+                "Download failed.\n\n"
+                "Possible reasons:\n"
+                "- The post is private or restricted\n"
+                "- The video is too large\n"
+                "- The website blocked the request\n"
+                "- The link is not supported"
+            )
+
+        await status_message.edit_text(clean_error)
 
     finally:
         if file_path:
