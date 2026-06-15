@@ -23,55 +23,40 @@ except Exception:
 MAX_DOWNLOAD_MB = int(os.getenv("DOWNLOADER_MAX_MB", "45"))
 MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_MB * 1024 * 1024
 
-DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("DOWNLOADER_TIMEOUT_SECONDS", "180"))
+DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("DOWNLOADER_TIMEOUT_SECONDS", "240"))
 
-# Optional cookies file for Instagram/X/Twitter/etc.
-# Example on Render:
-# INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt
-INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
+# Set this to 1 on Render only when debugging.
+# DOWNLOADER_SHOW_TECHNICAL_ERRORS=1
+SHOW_TECHNICAL_ERRORS = os.getenv("DOWNLOADER_SHOW_TECHNICAL_ERRORS", "0") == "1"
 
 ALLOWED_DOMAINS = (
     "youtube.com",
     "www.youtube.com",
     "m.youtube.com",
+    "music.youtube.com",
     "youtu.be",
-    "instagram.com",
-    "www.instagram.com",
+    "youtube-nocookie.com",
+    "www.youtube-nocookie.com",
+
     "x.com",
     "www.x.com",
     "twitter.com",
     "www.twitter.com",
+
     "tiktok.com",
     "www.tiktok.com",
     "vm.tiktok.com",
+)
+
+INSTAGRAM_DOMAINS = (
+    "instagram.com",
+    "www.instagram.com",
 )
 
 
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
-
-def is_instagram_url(url: str) -> bool:
-    try:
-        host = urlparse(url).netloc.lower()
-        return host == "instagram.com" or host.endswith(".instagram.com")
-    except Exception:
-        return False
-
-
-def get_cookies_file_for_url(url: str) -> Optional[str]:
-    """
-    Uses cookies only for Instagram links when INSTAGRAM_COOKIES_FILE is set.
-    The cookies file must be a Netscape-format cookies.txt file.
-    """
-    if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE:
-        cookies_path = Path(INSTAGRAM_COOKIES_FILE)
-
-        if cookies_path.exists() and cookies_path.is_file():
-            return str(cookies_path)
-
-    return None
-
 
 def downloader_help_text() -> str:
     return (
@@ -81,16 +66,16 @@ def downloader_help_text() -> str:
         "/audio <link> - download audio only\n"
         "/mp3 <link> - same as /audio\n"
         "/downloader_help - show this help\n\n"
+        "Supported now:\n"
+        "- YouTube public videos and shorts\n"
+        "- YouTube Music public links as audio\n"
+        "- TikTok public links\n"
+        "- X/Twitter public links\n\n"
+        "Instagram is disabled because it usually requires login/cookies.\n\n"
         "Examples:\n"
-        "/download https://www.youtube.com/watch?v=...\n"
-        "/download https://youtube.com/shorts/...\n"
-        "/download https://www.instagram.com/reel/...\n"
-        "/download https://x.com/user/status/...\n\n"
-        "Notes:\n"
-        "- Only public links are supported.\n"
-        "- Private Instagram/X/Twitter links may fail.\n"
-        f"- Max file size is {MAX_DOWNLOAD_MB} MB.\n"
-        "- Download only content you have permission to use."
+        "/dl https://www.youtube.com/watch?v=...\n"
+        "/audio https://www.youtube.com/watch?v=...\n\n"
+        f"Max file size: {MAX_DOWNLOAD_MB} MB"
     )
 
 
@@ -99,18 +84,27 @@ def extract_url_from_args(args) -> Optional[str]:
         return None
 
     text = " ".join(args).strip()
-
     match = re.search(r"https?://\S+", text)
 
     if not match:
         return None
 
     url = match.group(0).strip()
-
-    # Remove common trailing punctuation from copied messages.
     url = url.rstrip(").,]}>\"'")
 
     return url
+
+
+def get_host(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+
+
+def is_instagram_url(url: str) -> bool:
+    host = get_host(url)
+    return any(host == domain or host.endswith("." + domain) for domain in INSTAGRAM_DOMAINS)
 
 
 def is_allowed_url(url: str) -> bool:
@@ -128,6 +122,20 @@ def is_allowed_url(url: str) -> bool:
 
     except Exception:
         return False
+
+
+def is_youtube_url(url: str) -> bool:
+    host = get_host(url)
+    youtube_domains = (
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "www.youtube-nocookie.com",
+    )
+    return any(host == domain or host.endswith("." + domain) for domain in youtube_domains)
 
 
 def safe_title(text: str, max_length: int = 70) -> str:
@@ -151,61 +159,146 @@ def find_downloaded_file(directory: Path) -> Optional[Path]:
         return None
 
     files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-
     return files[0]
 
 
-def build_video_options(download_dir: Path, url: str) -> dict:
-    options = {
+def common_ytdlp_options(download_dir: Path) -> dict:
+    return {
         "outtmpl": str(download_dir / "%(title).80s_%(id)s.%(ext)s"),
-        "format": (
-            "best[filesize<45M][ext=mp4]/"
-            "best[filesize<45M]/"
-            "best[ext=mp4]/"
-            "best"
-        ),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "max_filesize": MAX_DOWNLOAD_BYTES,
-        "merge_output_format": "mp4",
-        "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
+        "socket_timeout": 40,
+        "retries": 3,
+        "fragment_retries": 3,
         "restrictfilenames": False,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
     }
 
-    cookies_file = get_cookies_file_for_url(url)
 
-    if cookies_file:
-        options["cookiefile"] = cookies_file
+def build_video_options(download_dir: Path, url: str) -> dict:
+    options = common_ytdlp_options(download_dir)
+
+    if is_youtube_url(url):
+        # Important:
+        # This asks for combined video+audio formats only.
+        # It avoids ffmpeg merging and works better on Render.
+        options.update(
+            {
+                "format": (
+                    "best[ext=mp4][acodec!=none][vcodec!=none][height<=720][filesize<45M]/"
+                    "best[ext=mp4][acodec!=none][vcodec!=none][height<=480]/"
+                    "best[acodec!=none][vcodec!=none][height<=480]/"
+                    "worst[ext=mp4][acodec!=none][vcodec!=none]/"
+                    "worst[acodec!=none][vcodec!=none]"
+                ),
+            }
+        )
+    else:
+        options.update(
+            {
+                "format": (
+                    "best[ext=mp4][acodec!=none][vcodec!=none][filesize<45M]/"
+                    "best[acodec!=none][vcodec!=none][filesize<45M]/"
+                    "best[ext=mp4][acodec!=none][vcodec!=none]/"
+                    "best[acodec!=none][vcodec!=none]/"
+                    "worst"
+                ),
+            }
+        )
 
     return options
 
 
 def build_audio_options(download_dir: Path, url: str) -> dict:
-    options = {
-        "outtmpl": str(download_dir / "%(title).80s_%(id)s.%(ext)s"),
-        "format": (
-            "bestaudio[filesize<45M]/"
-            "bestaudio/best"
-        ),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "max_filesize": MAX_DOWNLOAD_BYTES,
-        "socket_timeout": 30,
-        "retries": 2,
-        "fragment_retries": 2,
-        "restrictfilenames": False,
-    }
+    options = common_ytdlp_options(download_dir)
 
-    cookies_file = get_cookies_file_for_url(url)
-
-    if cookies_file:
-        options["cookiefile"] = cookies_file
+    # No mp3 conversion here, because mp3 conversion needs ffmpeg.
+    # Telegram can usually receive m4a/webm/opus as audio/document.
+    options.update(
+        {
+            "format": (
+                "bestaudio[ext=m4a][filesize<45M]/"
+                "bestaudio[filesize<45M]/"
+                "bestaudio/best"
+            ),
+        }
+    )
 
     return options
+
+
+def clean_error_message(error: Exception, mode: str, url: str) -> str:
+    error_text = str(error)
+
+    if "File is larger than max-filesize" in error_text or "too large" in error_text.lower():
+        return (
+            f"This file is too large.\n\n"
+            f"Current limit: {MAX_DOWNLOAD_MB} MB\n\n"
+            "Try /audio for YouTube music links."
+        )
+
+    if "Requested format is not available" in error_text:
+        if mode == "video":
+            return (
+                "Video format was not available in a small Telegram-friendly file.\n\n"
+                "Try this instead:\n"
+                "/audio <same link>"
+            )
+
+        return "Audio format was not available for this link."
+
+    if "Sign in to confirm" in error_text or "confirm your age" in error_text.lower():
+        return (
+            "YouTube requires login or age verification for this link.\n\n"
+            "The bot cannot download this video without login."
+        )
+
+    if "Private video" in error_text or "This video is private" in error_text:
+        return "This video is private or restricted."
+
+    if "Video unavailable" in error_text or "This video is unavailable" in error_text:
+        return "This video is unavailable or restricted in the server region."
+
+    if "copyright" in error_text.lower():
+        return "This video may be blocked because of copyright or region restrictions."
+
+    if is_youtube_url(url):
+        base = (
+            "YouTube download failed.\n\n"
+            "Try:\n"
+            "1. Use /audio for music links\n"
+            "2. Try another YouTube link\n"
+            "3. Try a shorter video\n"
+        )
+    else:
+        base = (
+            "Download failed.\n\n"
+            "Possible reasons:\n"
+            "- The post is private or restricted\n"
+            "- The video is too large\n"
+            "- The website blocked the request\n"
+            "- The link is not supported\n"
+        )
+
+    if SHOW_TECHNICAL_ERRORS:
+        short_error = error_text[:1200]
+        return base + "\nTechnical error:\n" + short_error
+
+    return base
 
 
 def run_ytdlp_download(url: str, mode: str) -> Tuple[Path, str, str]:
@@ -268,26 +361,41 @@ async def send_downloaded_file(
 
     caption = (
         f"{title}\n\n"
-        f"Size: {size_mb:.1f} MB\n"
-        f"Source: {source_url}"
+        f"Size: {size_mb:.1f} MB"
     )
 
     with file_path.open("rb") as file_obj:
         input_file = InputFile(file_obj, filename=file_path.name)
 
         if mode == "audio":
-            await update.message.reply_audio(
-                audio=input_file,
-                caption=caption,
-                title=title,
-            )
+            try:
+                await update.message.reply_audio(
+                    audio=input_file,
+                    caption=caption,
+                    title=title,
+                )
+            except Exception:
+                file_obj.seek(0)
+                input_file = InputFile(file_obj, filename=file_path.name)
+                await update.message.reply_document(
+                    document=input_file,
+                    caption=caption,
+                )
 
         elif suffix in (".mp4", ".mov", ".m4v", ".webm", ".mkv"):
-            await update.message.reply_video(
-                video=input_file,
-                caption=caption,
-                supports_streaming=True,
-            )
+            try:
+                await update.message.reply_video(
+                    video=input_file,
+                    caption=caption,
+                    supports_streaming=True,
+                )
+            except Exception:
+                file_obj.seek(0)
+                input_file = InputFile(file_obj, filename=file_path.name)
+                await update.message.reply_document(
+                    document=input_file,
+                    caption=caption,
+                )
 
         else:
             await update.message.reply_document(
@@ -308,8 +416,14 @@ async def handle_download_command(
 
     if not url:
         await update.message.reply_text(
-            "Please send a link.\n\n"
-            + downloader_help_text()
+            "Please send a link.\n\n" + downloader_help_text()
+        )
+        return
+
+    if is_instagram_url(url):
+        await update.message.reply_text(
+            "Instagram downloads are disabled because Instagram usually requires login/cookies.\n\n"
+            "Please send a YouTube, TikTok, or X/Twitter public link instead."
         )
         return
 
@@ -318,7 +432,6 @@ async def handle_download_command(
             "This link is not supported yet.\n\n"
             "Supported public links:\n"
             "- YouTube\n"
-            "- Instagram\n"
             "- X/Twitter\n"
             "- TikTok"
         )
@@ -342,7 +455,7 @@ async def handle_download_command(
     try:
         file_path, title, source_url = await download_with_timeout(url, mode)
 
-        await status_message.edit_text("Upload to Telegram started...")
+        await status_message.edit_text("Uploading to Telegram...")
 
         await send_downloaded_file(
             update=update,
@@ -359,53 +472,12 @@ async def handle_download_command(
 
     except asyncio.TimeoutError:
         await status_message.edit_text(
-            "Download timed out. Try a shorter or smaller video."
+            "Download timed out.\n\n"
+            "Try a shorter or smaller link."
         )
 
     except Exception as error:
-        error_text = str(error)
-
-        if "Instagram sent an empty media response" in error_text:
-            if INSTAGRAM_COOKIES_FILE:
-                clean_error = (
-                    "Instagram still did not allow this reel to be downloaded.\n\n"
-                    "Cookies file is configured, but possible reasons are:\n"
-                    "- Cookies are expired\n"
-                    "- Cookies file path is wrong\n"
-                    "- The reel is private or restricted\n"
-                    "- Instagram blocked the server request\n\n"
-                    f"Configured cookies path:\n{INSTAGRAM_COOKIES_FILE}"
-                )
-            else:
-                clean_error = (
-                    "Instagram did not allow this reel to be downloaded without login.\n\n"
-                    "To improve Instagram downloads, set this Render environment variable:\n\n"
-                    "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
-                )
-
-        elif "Private video" in error_text or "login" in error_text.lower():
-            clean_error = (
-                "This link needs login or is private/restricted.\n\n"
-                "For Instagram, use a cookies file with:\n"
-                "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
-            )
-
-        elif "File is larger than max-filesize" in error_text or "too large" in error_text.lower():
-            clean_error = (
-                f"This file is too large.\n\n"
-                f"Current limit: {MAX_DOWNLOAD_MB} MB"
-            )
-
-        else:
-            clean_error = (
-                "Download failed.\n\n"
-                "Possible reasons:\n"
-                "- The post is private or restricted\n"
-                "- The video is too large\n"
-                "- The website blocked the request\n"
-                "- The link is not supported"
-            )
-
+        clean_error = clean_error_message(error, mode, url)
         await status_message.edit_text(clean_error)
 
     finally:
