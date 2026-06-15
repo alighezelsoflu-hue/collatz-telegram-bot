@@ -20,6 +20,7 @@ from modules.fifa_module import register_fifa_handlers
 from modules.group_activity_module import register_group_activity_handlers
 from modules.downloader_module import register_downloader_handlers
 
+
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
 
@@ -38,7 +39,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text(
         "Hello! I am LakLak Bot.\n"
-        "I can calculate math problems, edit photos, show World Cup 2026 info, and summarize news.\n\n"
+        "I can calculate math problems, edit photos, show World Cup 2026 info, summarize news, "
+        "track group activity, and download public X/Twitter videos.\n\n"
 
         "Math:\n"
         "/collatz 27 - calculate Collatz and send all steps as a text file\n"
@@ -103,10 +105,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/activity_chart - send leaderboard chart as image\n"
         "/awards - fun weekly group awards\n\n"
 
-        "Downloader:\n"
-        "/download <link> - download public video from YouTube, Instagram, X/Twitter, TikTok\n"
+        "X/Twitter downloader:\n"
+        "/download <link> - download public X/Twitter video\n"
         "/dl <link> - same as /download\n"
-        "/audio <link> - download audio only\n"
+        "/audio <link> - download audio only when available\n"
         "/mp3 <link> - same as /audio\n"
         "/downloader_help - show downloader help\n\n"
 
@@ -183,11 +185,11 @@ async def setup_bot_commands() -> None:
         BotCommand("wc_group", "World Cup group standings"),
         BotCommand("wc_standings", "All World Cup standings"),
 
-        BotCommand("download", "Download public video link"),
-        BotCommand("dl", "Download public video link"),
-        BotCommand("audio", "Download audio only"),
-        BotCommand("mp3", "Download audio only"),
-        BotCommand("downloader_help", "Downloader help"),
+        BotCommand("download", "Download public X/Twitter video"),
+        BotCommand("dl", "Download public X/Twitter video"),
+        BotCommand("audio", "Download X/Twitter audio"),
+        BotCommand("mp3", "Download X/Twitter audio"),
+        BotCommand("downloader_help", "X/Twitter downloader help"),
 
         BotCommand("trump", "Latest Trump news summary"),
         BotCommand("trumpfile", "Trump news report file"),
@@ -215,8 +217,9 @@ def register_handlers() -> None:
     # Normal photo handler ignores ai_ modes, so AI photo handler can process them.
     register_photo_handlers(telegram_app)
     register_ai_photo_handlers(telegram_app)
+
     register_group_activity_handlers(telegram_app)
-    
+
 
 register_handlers()
 
@@ -306,6 +309,20 @@ async def root():
             "/wc_group A",
             "/wc_standings",
 
+            "/activity_today",
+            "/activity_week",
+            "/activity_month",
+            "/activity_year",
+            "/leaderboard",
+            "/activity_chart",
+            "/awards",
+
+            "/download https://x.com/user/status/123456789",
+            "/dl https://x.com/user/status/123456789",
+            "/audio https://x.com/user/status/123456789",
+            "/mp3 https://x.com/user/status/123456789",
+            "/downloader_help",
+
             "/trump",
             "/trumpfile",
 
@@ -317,7 +334,12 @@ async def root():
             "ai_photo_free_local": True,
             "news": True,
             "fifa": True,
-            "downloader": True,
+            "group_activity": True,
+            "x_twitter_downloader": True,
+        },
+        "downloader": {
+            "supported_platforms": ["X/Twitter"],
+            "removed_platforms": ["Instagram", "YouTube", "TikTok"],
         },
         "football_provider": "football-data.org",
         "world_cup_competition": WORLD_CUP_COMPETITION,

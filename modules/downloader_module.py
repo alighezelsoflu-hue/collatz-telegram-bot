@@ -25,24 +25,17 @@ MAX_DOWNLOAD_BYTES = MAX_DOWNLOAD_MB * 1024 * 1024
 
 DOWNLOAD_TIMEOUT_SECONDS = int(os.getenv("DOWNLOADER_TIMEOUT_SECONDS", "240"))
 
-# Optional Instagram cookies file.
-# On Render, set:
-# INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt
-INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
-
 # Set this to 1 on Render only for debugging.
 # DOWNLOADER_SHOW_TECHNICAL_ERRORS=1
 SHOW_TECHNICAL_ERRORS = os.getenv("DOWNLOADER_SHOW_TECHNICAL_ERRORS", "0") == "1"
 
 
 ALLOWED_DOMAINS = (
-    "instagram.com",
-    "www.instagram.com",
-
     "x.com",
     "www.x.com",
     "twitter.com",
     "www.twitter.com",
+    "mobile.twitter.com",
 )
 
 
@@ -51,27 +44,24 @@ ALLOWED_DOMAINS = (
 # ------------------------------------------------------------
 
 def downloader_help_text() -> str:
-    instagram_status = (
-        "Instagram cookies: configured"
-        if INSTAGRAM_COOKIES_FILE
-        else "Instagram cookies: not configured"
-    )
-
     return (
-        "Downloader commands:\n\n"
-        "/download <link> - download public video\n"
+        "X/Twitter downloader commands:\n\n"
+        "/download <link> - download public X/Twitter video\n"
         "/dl <link> - same as /download\n"
-        "/audio <link> - download audio only\n"
+        "/audio <link> - download audio only when available\n"
         "/mp3 <link> - same as /audio\n"
         "/downloader_help - show this help\n\n"
         "Supported links:\n"
-        "- X/Twitter public posts\n"
-        "- Instagram reels/posts if cookies are configured\n\n"
-        f"{instagram_status}\n"
+        "- X public video posts\n"
+        "- Twitter public video posts\n\n"
+        "Not supported anymore:\n"
+        "- Instagram\n"
+        "- YouTube\n"
+        "- TikTok\n\n"
         f"Max file size: {MAX_DOWNLOAD_MB} MB\n\n"
         "Examples:\n"
-        "/dl https://x.com/user/status/...\n"
-        "/dl https://www.instagram.com/reel/...\n"
+        "/dl https://x.com/user/status/123456789\n"
+        "/dl https://twitter.com/user/status/123456789\n"
     )
 
 
@@ -98,13 +88,9 @@ def get_host(url: str) -> str:
         return ""
 
 
-def is_instagram_url(url: str) -> bool:
-    host = get_host(url)
-    return host == "instagram.com" or host.endswith(".instagram.com")
-
-
 def is_x_url(url: str) -> bool:
     host = get_host(url)
+
     return (
         host == "x.com"
         or host.endswith(".x.com")
@@ -130,34 +116,12 @@ def is_allowed_url(url: str) -> bool:
         return False
 
 
-def get_cookies_file_for_url(url: str) -> Optional[str]:
-    """
-    Uses cookies only for Instagram links when INSTAGRAM_COOKIES_FILE is set.
-
-    The file must be Netscape cookies.txt format.
-    Example Render path:
-    /etc/secrets/instagram_cookies.txt
-    """
-    if not is_instagram_url(url):
-        return None
-
-    if not INSTAGRAM_COOKIES_FILE:
-        return None
-
-    cookies_path = Path(INSTAGRAM_COOKIES_FILE)
-
-    if cookies_path.exists() and cookies_path.is_file():
-        return str(cookies_path)
-
-    return None
-
-
 def safe_title(text: str, max_length: int = 70) -> str:
     text = re.sub(r"[^\w\s.\-()\[\]]+", "", text, flags=re.UNICODE)
     text = re.sub(r"\s+", " ", text).strip()
 
     if not text:
-        return "download"
+        return "twitter_download"
 
     return text[:max_length].strip()
 
@@ -176,8 +140,8 @@ def find_downloaded_file(directory: Path) -> Optional[Path]:
     return files[0]
 
 
-def common_ytdlp_options(download_dir: Path, url: str) -> dict:
-    options = {
+def common_ytdlp_options(download_dir: Path) -> dict:
+    return {
         "outtmpl": str(download_dir / "%(title).80s_%(id)s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -197,16 +161,9 @@ def common_ytdlp_options(download_dir: Path, url: str) -> dict:
         },
     }
 
-    cookies_file = get_cookies_file_for_url(url)
 
-    if cookies_file:
-        options["cookiefile"] = cookies_file
-
-    return options
-
-
-def build_video_options(download_dir: Path, url: str) -> dict:
-    options = common_ytdlp_options(download_dir, url)
+def build_video_options(download_dir: Path) -> dict:
+    options = common_ytdlp_options(download_dir)
 
     options.update(
         {
@@ -225,9 +182,11 @@ def build_video_options(download_dir: Path, url: str) -> dict:
     return options
 
 
-def build_audio_options(download_dir: Path, url: str) -> dict:
-    options = common_ytdlp_options(download_dir, url)
+def build_audio_options(download_dir: Path) -> dict:
+    options = common_ytdlp_options(download_dir)
 
+    # No mp3 conversion here because mp3 conversion needs ffmpeg.
+    # Telegram can usually receive m4a/webm/opus as audio/document.
     options.update(
         {
             "format": (
@@ -244,46 +203,6 @@ def build_audio_options(download_dir: Path, url: str) -> dict:
 def clean_error_message(error: Exception, mode: str, url: str) -> str:
     error_text = str(error)
 
-    if is_instagram_url(url):
-        if not INSTAGRAM_COOKIES_FILE:
-            return (
-                "Instagram download needs cookies.\n\n"
-                "You must add this Render environment variable:\n"
-                "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
-            )
-
-        if get_cookies_file_for_url(url) is None:
-            return (
-                "Instagram cookies file is configured, but the file was not found.\n\n"
-                f"Current path:\n{INSTAGRAM_COOKIES_FILE}\n\n"
-                "Check Render Secret Files and env var."
-            )
-
-        if (
-            "empty media response" in error_text.lower()
-            or "login" in error_text.lower()
-            or "cookies" in error_text.lower()
-            or "private" in error_text.lower()
-        ):
-            return (
-                "Instagram blocked this download even with cookies.\n\n"
-                "Possible reasons:\n"
-                "- Cookies are expired\n"
-                "- Instagram security check is needed\n"
-                "- The reel/post is private or restricted\n"
-                "- Instagram blocked the Render server\n\n"
-                "Export fresh Instagram cookies from Chrome and update the Render Secret File."
-            )
-
-        return (
-            "Instagram download failed.\n\n"
-            "Possible reasons:\n"
-            "- Cookies are expired\n"
-            "- The reel/post is private or restricted\n"
-            "- Instagram blocked the server\n"
-            "- The file is too large"
-        )
-
     if "File is larger than max-filesize" in error_text or "too large" in error_text.lower():
         return (
             f"This file is too large.\n\n"
@@ -297,20 +216,27 @@ def clean_error_message(error: Exception, mode: str, url: str) -> str:
                 "Try /audio with the same link."
             )
 
-        return "Audio format was not available for this link."
+        return "Audio format was not available for this X/Twitter link."
 
     if "Private video" in error_text or "private" in error_text.lower():
-        return "This post/video is private or restricted."
+        return "This X/Twitter post is private or restricted."
 
     if "unavailable" in error_text.lower():
-        return "This post/video is unavailable or restricted."
+        return "This X/Twitter post is unavailable or restricted."
+
+    if "login" in error_text.lower() or "cookies" in error_text.lower():
+        return (
+            "X/Twitter blocked this download or requires login.\n\n"
+            "The bot only supports public X/Twitter video posts."
+        )
 
     base = (
-        "Download failed.\n\n"
+        "X/Twitter download failed.\n\n"
         "Possible reasons:\n"
         "- The post is private or restricted\n"
+        "- The post has no video/audio\n"
         "- The video is too large\n"
-        "- The website blocked the request\n"
+        "- X/Twitter blocked the request\n"
         "- The link is not supported"
     )
 
@@ -324,13 +250,13 @@ def run_ytdlp_download(url: str, mode: str) -> Tuple[Path, str, str]:
     if yt_dlp is None:
         raise RuntimeError("yt-dlp is not installed. Add yt-dlp to requirements.txt and redeploy.")
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="laklak_download_"))
+    temp_dir = Path(tempfile.mkdtemp(prefix="laklak_x_download_"))
 
     try:
         if mode == "audio":
-            options = build_audio_options(temp_dir, url)
+            options = build_audio_options(temp_dir)
         else:
-            options = build_video_options(temp_dir, url)
+            options = build_video_options(temp_dir)
 
         with yt_dlp.YoutubeDL(options) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -348,7 +274,7 @@ def run_ytdlp_download(url: str, mode: str) -> Tuple[Path, str, str]:
                 f"Limit is {MAX_DOWNLOAD_MB} MB."
             )
 
-        title = safe_title(info.get("title") or "download")
+        title = safe_title(info.get("title") or "x_twitter_download")
         webpage_url = info.get("webpage_url") or url
 
         return downloaded_file, title, webpage_url
@@ -437,25 +363,16 @@ async def handle_download_command(
 
     if not url:
         await update.message.reply_text(
-            "Please send a link.\n\n" + downloader_help_text()
+            "Please send an X/Twitter link.\n\n" + downloader_help_text()
         )
         return
 
-    if not is_allowed_url(url):
+    if not is_allowed_url(url) or not is_x_url(url):
         await update.message.reply_text(
-            "This link is not supported now.\n\n"
-            "Supported links:\n"
-            "- X/Twitter\n"
-            "- Instagram"
-        )
-        return
-
-    if is_instagram_url(url) and not INSTAGRAM_COOKIES_FILE:
-        await update.message.reply_text(
-            "Instagram download needs cookies.\n\n"
-            "You logged in with Chrome. Now export Instagram cookies and add them to Render.\n\n"
-            "Required Render env var:\n"
-            "INSTAGRAM_COOKIES_FILE=/etc/secrets/instagram_cookies.txt"
+            "This downloader now supports only X/Twitter links.\n\n"
+            "Examples:\n"
+            "/dl https://x.com/user/status/123456789\n"
+            "/dl https://twitter.com/user/status/123456789"
         )
         return
 
@@ -468,7 +385,7 @@ async def handle_download_command(
         return
 
     status_message = await update.message.reply_text(
-        "Downloading... please wait.\n\n"
+        "Downloading from X/Twitter... please wait.\n\n"
         f"Limit: {MAX_DOWNLOAD_MB} MB"
     )
 
@@ -495,7 +412,7 @@ async def handle_download_command(
     except asyncio.TimeoutError:
         await status_message.edit_text(
             "Download timed out.\n\n"
-            "Try a shorter or smaller link."
+            "Try a shorter or smaller X/Twitter video."
         )
 
     except Exception as error:
