@@ -20,6 +20,7 @@ from modules.fifa_module import register_fifa_handlers
 from modules.group_activity_module import register_group_activity_handlers
 from modules.downloader_module import register_downloader_handlers
 from modules.birthday_module import register_birthday_handlers
+from modules.game_module import register_game_handlers
 
 if not TOKEN:
     raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")
@@ -121,6 +122,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/remove_birthday Ali - remove a birthday\n"
         "/birthday_help - show birthday help\n\n"
 
+        "Games:\n"
+        "/dart - throw one dart and save your score\n"
+        "/dart_battle - start a group dart battle\n"
+        "/join_dart - join the current dart battle\n"
+        "/start_dart - start battle and throw darts for all players\n"
+        "/cancel_dart - cancel current dart battle\n"
+        "/dart_score - show your dart stats\n"
+        "/dart_top - show group tournament scoreboard\n"
+        "/dart_help - show dart help\n\n"
+
         "/cancel - cancel current photo mode\n\n"
         "Tip: type / to see the command menu."
     )
@@ -210,6 +221,15 @@ async def setup_bot_commands() -> None:
         BotCommand("remove_birthday", "Remove a birthday"),
         BotCommand("birthday_help", "Birthday help"),
 
+        BotCommand("dart", "Throw one dart"),
+        BotCommand("dart_battle", "Start dart battle"),
+        BotCommand("join_dart", "Join dart battle"),
+        BotCommand("start_dart", "Start dart battle throws"),
+        BotCommand("cancel_dart", "Cancel dart battle"),
+        BotCommand("dart_score", "Show your dart stats"),
+        BotCommand("dart_top", "Dart tournament scoreboard"),
+        BotCommand("dart_help", "Dart game help"),
+
         BotCommand("cancel", "Cancel current photo mode"),
     ]
 
@@ -229,6 +249,7 @@ def register_handlers() -> None:
     register_news_handlers(telegram_app)
     register_downloader_handlers(telegram_app)
     register_birthday_handlers(telegram_app)
+    register_game_handlers(telegram_app)
 
     register_photo_handlers(telegram_app)
     register_ai_photo_handlers(telegram_app)
@@ -352,6 +373,7 @@ async def root():
             "group_activity": True,
             "x_twitter_downloader": True,
             "birthdays": True,
+            "games": True,
         },
         "downloader": {
             "supported_platforms": ["X/Twitter"],
