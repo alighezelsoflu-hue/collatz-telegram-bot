@@ -58,6 +58,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/roots 1 0 0 -1 - same as /polyroots\n"
         "/primes 100 - list all prime numbers less than 100\n"
         "/primesfile 10000 - send prime numbers as a text file\n"
+        "/polyplot 1 -5 6 - plot a polynomial\n"
+        "/polyplot 1 -5 6 range -2 8 - plot with custom x range\n"
 
         "Photo tools:\n"
         "/enhance - improve brightness, contrast, color, and sharpness\n"
@@ -177,6 +179,8 @@ async def setup_bot_commands() -> None:
         BotCommand("roots", "Find roots of a polynomial"),
         BotCommand("primes", "Prime numbers less than n"),
         BotCommand("primesfile", "Prime numbers as file"),
+        BotCommand("polyplot", "Plot a polynomial"),
+        BotCommand("plotpoly", "Plot a polynomial"),
 
         BotCommand("enhance", "Improve photo quality"),
         BotCommand("vintage", "Vintage photo effect"),

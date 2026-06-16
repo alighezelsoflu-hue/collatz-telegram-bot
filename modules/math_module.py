@@ -10,6 +10,9 @@ from utils import split_long_text, text_to_file
 from config import MAX_INPUT
 from utils import text_to_file
 
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+from telegram import InputFile
 
 # ------------------------------------------------------------
 # Collatz logic
@@ -1512,6 +1515,310 @@ async def primesfile_command(update, context) -> None:
         caption=f"Prime numbers less than {limit}",
     )
 
+
+
+# ------------------------------------------------------------
+# Polynomial plot
+# ------------------------------------------------------------
+
+def parse_polyplot_args(args):
+    """
+    Usage:
+    /polyplot 1 -5 6
+    /polyplot 1 -5 6 range -2 8
+
+    Coefficients are from highest degree to constant term.
+    """
+    if not args:
+        raise ValueError("Please provide polynomial coefficients.")
+
+    lowered = [arg.lower() for arg in args]
+
+    xmin = None
+    xmax = None
+
+    if "range" in lowered:
+        range_index = lowered.index("range")
+        coefficient_args = args[:range_index]
+        range_args = args[range_index + 1:]
+
+        if len(range_args) != 2:
+            raise ValueError("Range must be: range xmin xmax")
+
+        xmin = float(range_args[0])
+        xmax = float(range_args[1])
+
+    else:
+        coefficient_args = args
+
+    coefficients = parse_polynomial_coefficients(coefficient_args)
+
+    if xmin is None or xmax is None:
+        degree = len(coefficients) - 1
+
+        if degree <= 2:
+            xmin, xmax = -10.0, 10.0
+        else:
+            xmin, xmax = -5.0, 5.0
+
+    if xmin >= xmax:
+        raise ValueError("xmin must be smaller than xmax.")
+
+    if xmax - xmin > 1_000_000:
+        raise ValueError("Range is too large.")
+
+    return coefficients, xmin, xmax
+
+
+def evaluate_polynomial_real(coefficients, x: float) -> float:
+    result = 0.0
+
+    for coefficient in coefficients:
+        result = result * x + coefficient
+
+    return result
+
+
+def load_plot_font(size: int = 22):
+    possible_fonts = [
+        "arial.ttf",
+        "DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    for font_path in possible_fonts:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except Exception:
+            pass
+
+    return ImageFont.load_default()
+
+
+def nice_number(value: float) -> str:
+    if abs(value) < 1e-10:
+        value = 0.0
+
+    if abs(value - round(value)) < 1e-10:
+        return str(int(round(value)))
+
+    return f"{value:.4g}"
+
+
+def create_polynomial_plot_image(coefficients, xmin: float, xmax: float) -> BytesIO:
+    width = 1400
+    height = 900
+
+    margin_left = 110
+    margin_right = 50
+    margin_top = 90
+    margin_bottom = 110
+
+    plot_left = margin_left
+    plot_right = width - margin_right
+    plot_top = margin_top
+    plot_bottom = height - margin_bottom
+
+    plot_width = plot_right - plot_left
+    plot_height = plot_bottom - plot_top
+
+    samples = 700
+    points = []
+
+    for i in range(samples + 1):
+        x = xmin + (xmax - xmin) * i / samples
+        y = evaluate_polynomial_real(coefficients, x)
+
+        if abs(y) > 1e100:
+            continue
+
+        points.append((x, y))
+
+    if not points:
+        raise ValueError("Could not evaluate polynomial in this range.")
+
+    y_values = [y for _, y in points]
+    sorted_y = sorted(y_values)
+
+    # Robust y-range: ignore extreme spikes so graph stays readable.
+    low_index = max(0, int(len(sorted_y) * 0.02))
+    high_index = min(len(sorted_y) - 1, int(len(sorted_y) * 0.98))
+
+    ymin = sorted_y[low_index]
+    ymax = sorted_y[high_index]
+
+    # Include x-axis if possible.
+    ymin = min(ymin, 0)
+    ymax = max(ymax, 0)
+
+    if abs(ymax - ymin) < 1e-12:
+        ymin -= 1
+        ymax += 1
+
+    y_padding = (ymax - ymin) * 0.10
+    ymin -= y_padding
+    ymax += y_padding
+
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    title_font = load_plot_font(34)
+    label_font = load_plot_font(22)
+    small_font = load_plot_font(18)
+
+    polynomial_text = polynomial_to_text(coefficients)
+
+    draw.text(
+        (margin_left, 30),
+        f"Polynomial plot: {polynomial_text}",
+        fill="black",
+        font=title_font,
+    )
+
+    def map_x(x: float) -> int:
+        return int(plot_left + (x - xmin) / (xmax - xmin) * plot_width)
+
+    def map_y(y: float) -> int:
+        return int(plot_bottom - (y - ymin) / (ymax - ymin) * plot_height)
+
+    # Background
+    draw.rectangle(
+        (plot_left, plot_top, plot_right, plot_bottom),
+        outline="#222222",
+        width=2,
+        fill="#fbfbfb",
+    )
+
+    # Grid
+    grid_lines = 10
+
+    for i in range(grid_lines + 1):
+        gx = plot_left + i * plot_width / grid_lines
+        gy = plot_top + i * plot_height / grid_lines
+
+        draw.line((gx, plot_top, gx, plot_bottom), fill="#dddddd", width=1)
+        draw.line((plot_left, gy, plot_right, gy), fill="#dddddd", width=1)
+
+    # Axes
+    if xmin <= 0 <= xmax:
+        x0 = map_x(0)
+        draw.line((x0, plot_top, x0, plot_bottom), fill="#333333", width=3)
+
+    if ymin <= 0 <= ymax:
+        y0 = map_y(0)
+        draw.line((plot_left, y0, plot_right, y0), fill="#333333", width=3)
+
+    # Axis labels
+    for i in range(grid_lines + 1):
+        x_value = xmin + i * (xmax - xmin) / grid_lines
+        x_pixel = plot_left + i * plot_width / grid_lines
+
+        draw.text(
+            (x_pixel - 25, plot_bottom + 18),
+            nice_number(x_value),
+            fill="#333333",
+            font=small_font,
+        )
+
+        y_value = ymax - i * (ymax - ymin) / grid_lines
+        y_pixel = plot_top + i * plot_height / grid_lines
+
+        draw.text(
+            (15, y_pixel - 10),
+            nice_number(y_value),
+            fill="#333333",
+            font=small_font,
+        )
+
+    # Function curve
+    pixel_points = []
+
+    for x, y in points:
+        if y < ymin or y > ymax:
+            pixel_points.append(None)
+            continue
+
+        pixel_points.append((map_x(x), map_y(y)))
+
+    current_segment = []
+
+    for point in pixel_points:
+        if point is None:
+            if len(current_segment) >= 2:
+                draw.line(current_segment, fill="#1f77b4", width=4)
+            current_segment = []
+        else:
+            current_segment.append(point)
+
+    if len(current_segment) >= 2:
+        draw.line(current_segment, fill="#1f77b4", width=4)
+
+    # Real roots
+    try:
+        roots = solve_polynomial_roots(coefficients)
+        real_roots = [
+            root.real
+            for root in roots
+            if abs(root.imag) < 1e-7 and xmin <= root.real <= xmax
+        ]
+
+        for root in real_roots:
+            rx = map_x(root)
+            ry = map_y(0)
+            draw.ellipse((rx - 8, ry - 8, rx + 8, ry + 8), fill="#d62728")
+            draw.text(
+                (rx + 10, ry - 28),
+                f"x={nice_number(root)}",
+                fill="#d62728",
+                font=small_font,
+            )
+
+    except Exception:
+        pass
+
+    draw.text(
+        (margin_left, height - 55),
+        f"x range: [{nice_number(xmin)}, {nice_number(xmax)}] | y range: [{nice_number(ymin)}, {nice_number(ymax)}]",
+        fill="#555555",
+        font=label_font,
+    )
+
+    output = BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    output.name = "polynomial_plot.png"
+
+    return output
+
+
+async def polyplot_command(update, context) -> None:
+    if not update.message:
+        return
+
+    try:
+        coefficients, xmin, xmax = parse_polyplot_args(context.args)
+        polynomial_text = polynomial_to_text(coefficients)
+        image = create_polynomial_plot_image(coefficients, xmin, xmax)
+
+    except Exception as error:
+        await update.message.reply_text(
+            "Polynomial plot error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/polyplot 1 -5 6\n"
+            "/polyplot 1 0 -4\n"
+            "/polyplot 1 0 0 -1\n"
+            "/polyplot 1 -5 6 range -2 8\n\n"
+            "Coefficients must be from highest degree to constant term.\n"
+            "Example: /polyplot 1 -5 6 means x² - 5x + 6"
+        )
+        return
+
+    await update.message.reply_photo(
+        photo=InputFile(image, filename="polynomial_plot.png"),
+        caption=f"Plot of {polynomial_text}",
+    )    
+
 def register_math_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("collatz", collatz_command))
 
@@ -1536,3 +1843,5 @@ def register_math_handlers(app: Application) -> None:
 
     app.add_handler(CommandHandler("primes", primes_command))
     app.add_handler(CommandHandler("primesfile", primesfile_command))
+    app.add_handler(CommandHandler("polyplot", polyplot_command))
+    app.add_handler(CommandHandler("plotpoly", polyplot_command))
