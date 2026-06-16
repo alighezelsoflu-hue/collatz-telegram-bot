@@ -54,6 +54,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/pi - show pi number\n"
         "/e - show Euler's number\n"
         "/mathhelp - show calculator examples\n\n"
+        "/polyroots 1 -5 6 - find roots of a polynomial\n"
+        "/roots 1 0 0 -1 - same as /polyroots\n"
+        "/primes 100 - list all prime numbers less than 100\n"
+        "/primesfile 10000 - send prime numbers as a text file\n"
 
         "Photo tools:\n"
         "/enhance - improve brightness, contrast, color, and sharpness\n"
@@ -169,6 +173,10 @@ async def setup_bot_commands() -> None:
         BotCommand("pi", "Show pi number"),
         BotCommand("e", "Show Euler number"),
         BotCommand("mathhelp", "Show math examples"),
+        BotCommand("polyroots", "Find roots of a polynomial"),
+        BotCommand("roots", "Find roots of a polynomial"),
+        BotCommand("primes", "Prime numbers less than n"),
+        BotCommand("primesfile", "Prime numbers as file"),
 
         BotCommand("enhance", "Improve photo quality"),
         BotCommand("vintage", "Vintage photo effect"),

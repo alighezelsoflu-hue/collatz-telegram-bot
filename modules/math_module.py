@@ -3,10 +3,10 @@ from collections import Counter
 import ast
 import math
 import operator
-
+import cmath
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from utils import split_long_text, text_to_file
 from config import MAX_INPUT
 from utils import text_to_file
 
@@ -1152,6 +1152,365 @@ async def mathhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await update.message.reply_text(build_math_help_text())
 
+# ------------------------------------------------------------
+# Polynomial roots
+# ------------------------------------------------------------
+
+def parse_polynomial_coefficients(args):
+    """
+    Parses coefficients from:
+    /polyroots 1 -5 6
+    /polyroots 1, -5, 6
+
+    Coefficients must be from highest degree to constant term.
+    Example:
+    1 -5 6 means x^2 - 5x + 6
+    """
+    if not args:
+        raise ValueError("Please provide polynomial coefficients.")
+
+    text = " ".join(args).replace(",", " ")
+    parts = [part.strip() for part in text.split() if part.strip()]
+
+    if len(parts) < 2:
+        raise ValueError("A polynomial needs at least 2 coefficients.")
+
+    coefficients = []
+
+    for part in parts:
+        try:
+            coefficients.append(float(part))
+        except Exception:
+            raise ValueError(f"Invalid coefficient: {part}")
+
+    # Remove leading zero coefficients.
+    while coefficients and abs(coefficients[0]) < 1e-12:
+        coefficients.pop(0)
+
+    if len(coefficients) < 2:
+        raise ValueError("Leading coefficient cannot be zero.")
+
+    return coefficients
+
+
+def format_real_number(value: float, digits: int = 10) -> str:
+    if abs(value) < 1e-10:
+        value = 0.0
+
+    if abs(value - round(value)) < 1e-10:
+        return str(int(round(value)))
+
+    return f"{value:.{digits}g}"
+
+
+def format_complex_number(value: complex) -> str:
+    real = value.real
+    imag = value.imag
+
+    if abs(real) < 1e-10:
+        real = 0.0
+
+    if abs(imag) < 1e-10:
+        imag = 0.0
+
+    if imag == 0:
+        return format_real_number(real)
+
+    if real == 0:
+        return f"{format_real_number(imag)}i"
+
+    sign = "+" if imag > 0 else "-"
+    return f"{format_real_number(real)} {sign} {format_real_number(abs(imag))}i"
+
+
+def polynomial_to_text(coefficients) -> str:
+    degree = len(coefficients) - 1
+    terms = []
+
+    for index, coefficient in enumerate(coefficients):
+        power = degree - index
+
+        if abs(coefficient) < 1e-12:
+            continue
+
+        abs_coefficient = abs(coefficient)
+
+        if power == 0:
+            term = format_real_number(abs_coefficient)
+        elif power == 1:
+            if abs(abs_coefficient - 1) < 1e-12:
+                term = "x"
+            else:
+                term = f"{format_real_number(abs_coefficient)}x"
+        else:
+            if abs(abs_coefficient - 1) < 1e-12:
+                term = f"x^{power}"
+            else:
+                term = f"{format_real_number(abs_coefficient)}x^{power}"
+
+        if not terms:
+            if coefficient < 0:
+                terms.append("-" + term)
+            else:
+                terms.append(term)
+        else:
+            if coefficient < 0:
+                terms.append("- " + term)
+            else:
+                terms.append("+ " + term)
+
+    if not terms:
+        return "0"
+
+    return " ".join(terms)
+
+
+def evaluate_polynomial_complex(coefficients, x: complex) -> complex:
+    result = 0j
+
+    for coefficient in coefficients:
+        result = result * x + coefficient
+
+    return result
+
+
+def solve_polynomial_roots(coefficients):
+    """
+    Degree 1 and 2 are solved directly.
+    Degree 3+ uses Durand-Kerner numerical method.
+    """
+    degree = len(coefficients) - 1
+
+    if degree < 1:
+        raise ValueError("This is not a polynomial equation.")
+
+    if degree == 1:
+        a, b = coefficients
+        return [complex(-b / a)]
+
+    if degree == 2:
+        a, b, c = coefficients
+        discriminant = complex(b * b - 4 * a * c)
+        sqrt_discriminant = cmath.sqrt(discriminant)
+
+        root1 = (-b + sqrt_discriminant) / (2 * a)
+        root2 = (-b - sqrt_discriminant) / (2 * a)
+
+        return sorted([root1, root2], key=lambda z: (z.real, z.imag))
+
+    # Normalize polynomial so leading coefficient is 1.
+    leading = coefficients[0]
+    normalized = [complex(coefficient / leading) for coefficient in coefficients]
+
+    # Cauchy-style radius.
+    radius = 1 + max(abs(coefficient) for coefficient in normalized[1:])
+
+    roots = [
+        radius * cmath.exp(2j * cmath.pi * index / degree)
+        for index in range(degree)
+    ]
+
+    max_iterations = 2000
+    tolerance = 1e-12
+
+    for _ in range(max_iterations):
+        new_roots = []
+
+        for i, root in enumerate(roots):
+            denominator = 1j * 0 + 1
+
+            for j, other_root in enumerate(roots):
+                if i == j:
+                    continue
+
+                difference = root - other_root
+
+                if abs(difference) < 1e-14:
+                    difference = complex(1e-14, 1e-14)
+
+                denominator *= difference
+
+            new_root = root - evaluate_polynomial_complex(normalized, root) / denominator
+            new_roots.append(new_root)
+
+        max_change = max(abs(new_roots[i] - roots[i]) for i in range(degree))
+        roots = new_roots
+
+        if max_change < tolerance:
+            break
+
+    return sorted(roots, key=lambda z: (z.real, z.imag))
+
+
+def build_polynomial_roots_report(coefficients, roots) -> str:
+    degree = len(coefficients) - 1
+    polynomial_text = polynomial_to_text(coefficients)
+
+    lines = [
+        "Polynomial roots",
+        "",
+        f"Polynomial:",
+        f"{polynomial_text} = 0",
+        "",
+        f"Degree: {degree}",
+        "",
+        "Roots:",
+    ]
+
+    for index, root in enumerate(roots, start=1):
+        lines.append(f"x{index} = {format_complex_number(root)}")
+
+    if degree >= 3:
+        lines.extend(
+            [
+                "",
+                "Note:",
+                "Roots for degree 3 and higher are numerical approximations.",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+async def polyroots_command(update, context) -> None:
+    if not update.message:
+        return
+
+    try:
+        coefficients = parse_polynomial_coefficients(context.args)
+        roots = solve_polynomial_roots(coefficients)
+        report = build_polynomial_roots_report(coefficients, roots)
+
+    except Exception as error:
+        await update.message.reply_text(
+            "Polynomial roots error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/polyroots 1 -5 6\n"
+            "/polyroots 1 0 -4\n"
+            "/polyroots 1 0 0 -1\n\n"
+            "Coefficients must be from highest degree to constant term.\n"
+            "Example: /polyroots 1 -5 6 means x² - 5x + 6 = 0"
+        )
+        return
+
+    for chunk in split_long_text(report):
+        await update.message.reply_text(chunk)
+
+
+# ------------------------------------------------------------
+# Prime numbers
+# ------------------------------------------------------------
+
+MAX_PRIME_LIMIT = 1_000_000
+
+
+def parse_prime_limit(args) -> int:
+    if not args:
+        raise ValueError("Please provide a limit.")
+
+    text = "".join(args).replace(",", "").replace("_", "").strip()
+
+    if not text.isdigit():
+        raise ValueError("Limit must be a positive integer.")
+
+    limit = int(text)
+
+    if limit < 2:
+        raise ValueError("Limit must be at least 2.")
+
+    if limit > MAX_PRIME_LIMIT:
+        raise ValueError(f"Limit is too large. Maximum allowed is {MAX_PRIME_LIMIT}.")
+
+    return limit
+
+
+def primes_less_than(limit: int):
+    if limit <= 2:
+        return []
+
+    sieve = bytearray(b"\x01") * limit
+    sieve[0:2] = b"\x00\x00"
+
+    max_check = int(limit ** 0.5) + 1
+
+    for number in range(2, max_check):
+        if sieve[number]:
+            start = number * number
+            step = number
+            count = ((limit - 1 - start) // step) + 1
+            sieve[start:limit:step] = b"\x00" * count
+
+    return [number for number in range(limit) if sieve[number]]
+
+
+def build_primes_report(limit: int, primes) -> str:
+    lines = [
+        f"Prime numbers less than {limit}",
+        "",
+        f"Count: {len(primes)}",
+        "",
+    ]
+
+    if primes:
+        lines.append(", ".join(str(prime) for prime in primes))
+    else:
+        lines.append("No prime numbers found.")
+
+    return "\n".join(lines)
+
+
+async def primes_command(update, context) -> None:
+    if not update.message:
+        return
+
+    try:
+        limit = parse_prime_limit(context.args)
+        primes = primes_less_than(limit)
+        report = build_primes_report(limit, primes)
+
+    except Exception as error:
+        await update.message.reply_text(
+            "Prime numbers error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/primes 100\n"
+            "/primes 1000\n"
+            "/primesfile 100000"
+        )
+        return
+
+    if len(report) <= 3500:
+        await update.message.reply_text(report)
+    else:
+        await update.message.reply_document(
+            document=text_to_file(report, f"primes_less_than_{limit}.txt"),
+            caption=f"Prime numbers less than {limit}",
+        )
+
+
+async def primesfile_command(update, context) -> None:
+    if not update.message:
+        return
+
+    try:
+        limit = parse_prime_limit(context.args)
+        primes = primes_less_than(limit)
+        report = build_primes_report(limit, primes)
+
+    except Exception as error:
+        await update.message.reply_text(
+            "Prime file error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/primesfile 10000"
+        )
+        return
+
+    await update.message.reply_document(
+        document=text_to_file(report, f"primes_less_than_{limit}.txt"),
+        caption=f"Prime numbers less than {limit}",
+    )
 
 def register_math_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("collatz", collatz_command))
@@ -1171,3 +1530,9 @@ def register_math_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("pi", pi_command))
     app.add_handler(CommandHandler("e", e_command))
     app.add_handler(CommandHandler("mathhelp", mathhelp_command))
+
+    app.add_handler(CommandHandler("polyroots", polyroots_command))
+    app.add_handler(CommandHandler("roots", polyroots_command))
+
+    app.add_handler(CommandHandler("primes", primes_command))
+    app.add_handler(CommandHandler("primesfile", primesfile_command))
