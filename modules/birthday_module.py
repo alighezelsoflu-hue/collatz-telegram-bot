@@ -1,88 +1,135 @@
 import os
-import sqlite3
 from datetime import date, datetime
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:
+    psycopg = None
+    dict_row = None
 
 
 # ------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------
 
-BIRTHDAY_DB_PATH = os.getenv("BIRTHDAY_DB_PATH", "birthdays.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+BIRTHDAY_TIMEZONE = os.getenv("BIRTHDAY_TIMEZONE", "Europe/Berlin")
+
+try:
+    LOCAL_TZ = ZoneInfo(BIRTHDAY_TIMEZONE)
+except Exception:
+    LOCAL_TZ = ZoneInfo("UTC")
 
 
 # ------------------------------------------------------------
 # Database
 # ------------------------------------------------------------
 
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(BIRTHDAY_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def database_is_configured() -> bool:
+    return bool(DATABASE_URL) and psycopg is not None
+
+
+def get_db_connection():
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is not installed. Add psycopg[binary] to requirements.txt and redeploy."
+        )
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is missing. Add your Neon Postgres connection string to Render."
+        )
+
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_birthday_db() -> None:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    if not database_is_configured():
+        return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS birthdays (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            chat_title TEXT,
-            name TEXT NOT NULL,
-            birth_year INTEGER,
-            birth_month INTEGER NOT NULL,
-            birth_day INTEGER NOT NULL,
-            added_by_user_id INTEGER,
-            added_by_name TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(chat_id, name)
-        )
-        """
-    )
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS birthdays (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    chat_title TEXT,
+                    name TEXT NOT NULL,
+                    name_key TEXT NOT NULL,
+                    birth_year INTEGER,
+                    birth_month INTEGER NOT NULL,
+                    birth_day INTEGER NOT NULL,
+                    added_by_user_id BIGINT,
+                    added_by_name TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(chat_id, name_key)
+                )
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_birthdays_chat "
-        "ON birthdays(chat_id)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_birthdays_chat
+                ON birthdays(chat_id)
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_birthdays_date "
-        "ON birthdays(chat_id, birth_month, birth_day)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_birthdays_date
+                ON birthdays(chat_id, birth_month, birth_day)
+                """
+            )
 
-    conn.commit()
-    conn.close()
 
-
-init_birthday_db()
+# Create table automatically on Render when DATABASE_URL exists.
+try:
+    init_birthday_db()
+except Exception as error:
+    print(f"Birthday database init failed: {error}")
 
 
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
 
+def today_local() -> date:
+    return datetime.now(LOCAL_TZ).date()
+
+
 def birthday_help_text() -> str:
     return (
         "Birthday commands:\n\n"
         "/add_birthday Ali 1990-05-12 - add birthday with year\n"
-        "/add_birthday Sara 05-12 - add birthday without year\n"
+        "/add_birthday Sara 12-05 - add birthday without year\n"
         "/birthdays - show all saved birthdays\n"
         "/next_birthday - show the next upcoming birthday\n"
         "/birthday_today - show today's birthdays\n"
         "/remove_birthday Ali - remove a birthday\n"
         "/birthday_help - show this help\n\n"
         "Date formats:\n"
-        "YYYY-MM-DD, DD-MM-YYYY, MM-DD, or DD-MM\n\n"
+        "YYYY-MM-DD, DD-MM-YYYY, or DD-MM\n\n"
         "Examples:\n"
         "/add_birthday Ali 1990-05-12\n"
         "/add_birthday Sara 12-05"
+    )
+
+
+def db_error_text() -> str:
+    return (
+        "Birthday database is not ready.\n\n"
+        "Please check:\n"
+        "1. DATABASE_URL exists in Render Environment Variables\n"
+        "2. psycopg[binary] exists in requirements.txt\n"
+        "3. Render was redeployed after adding DATABASE_URL"
     )
 
 
@@ -108,6 +155,10 @@ def normalize_name(name: str) -> str:
     return " ".join(name.strip().split())
 
 
+def name_key(name: str) -> str:
+    return normalize_name(name).casefold()
+
+
 def parse_birthday_date(text: str) -> Tuple[Optional[int], int, int]:
     """
     Supports:
@@ -115,11 +166,9 @@ def parse_birthday_date(text: str) -> Tuple[Optional[int], int, int]:
     DD-MM-YYYY
     YYYY/MM/DD
     DD/MM/YYYY
-    MM-DD
     DD-MM
 
-    For two-part dates, we use DD-MM by default if the first number is > 12.
-    If both are <= 12, we treat it as DD-MM because most users here likely use European/Iranian style.
+    For two-part dates, the default is DD-MM.
     Example:
     12-05 => 12 May
     """
@@ -133,27 +182,27 @@ def parse_birthday_date(text: str) -> Tuple[Optional[int], int, int]:
             year = int(a)
             month = int(b)
             day = int(c)
+
         elif len(c) == 4:
             day = int(a)
             month = int(b)
             year = int(c)
+
         else:
             raise ValueError("Invalid date format.")
 
     elif len(parts) == 2:
         year = None
-        first = int(parts[0])
-        second = int(parts[1])
-
-        # Default: DD-MM
-        day = first
-        month = second
+        day = int(parts[0])
+        month = int(parts[1])
 
     else:
         raise ValueError("Invalid date format.")
 
+    current_year = today_local().year
+
     if year is not None:
-        if year < 1900 or year > date.today().year:
+        if year < 1900 or year > current_year:
             raise ValueError("Birth year looks invalid.")
 
     if month < 1 or month > 12:
@@ -162,8 +211,6 @@ def parse_birthday_date(text: str) -> Tuple[Optional[int], int, int]:
     if day < 1 or day > 31:
         raise ValueError("Day must be between 1 and 31.")
 
-    # Validate real calendar date.
-    # Use leap year 2000 for yearless dates so 29 Feb is allowed.
     validation_year = year if year is not None else 2000
 
     try:
@@ -174,11 +221,16 @@ def parse_birthday_date(text: str) -> Tuple[Optional[int], int, int]:
     return year, month, day
 
 
-def calculate_age(birth_year: Optional[int], month: int, day: int, on_date: Optional[date] = None) -> Optional[int]:
+def calculate_age(
+    birth_year: Optional[int],
+    month: int,
+    day: int,
+    on_date: Optional[date] = None,
+) -> Optional[int]:
     if birth_year is None:
         return None
 
-    today = on_date or date.today()
+    today = on_date or today_local()
     age = today.year - birth_year
 
     if (today.month, today.day) < (month, day):
@@ -187,13 +239,12 @@ def calculate_age(birth_year: Optional[int], month: int, day: int, on_date: Opti
     return age
 
 
-def days_until_birthday(month: int, day: int, today: Optional[date] = None) -> int:
-    today = today or date.today()
+def days_until_birthday(month: int, day: int, on_date: Optional[date] = None) -> int:
+    today = on_date or today_local()
 
     try:
         birthday_this_year = date(today.year, month, day)
     except ValueError:
-        # 29 Feb handling on non-leap years.
         birthday_this_year = date(today.year, 2, 28)
 
     if birthday_this_year >= today:
@@ -241,13 +292,6 @@ def format_birthday_line(row, index: Optional[int] = None) -> str:
     return f"{prefix}{name} — {birthday_text}{age_text} — {remaining_text}"
 
 
-def ensure_chat(update: Update) -> Optional[str]:
-    if not update.effective_chat:
-        return "Chat not found."
-
-    return None
-
-
 # ------------------------------------------------------------
 # Database operations
 # ------------------------------------------------------------
@@ -262,92 +306,86 @@ def upsert_birthday(
     added_by_user_id: Optional[int],
     added_by_name: str,
 ) -> None:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    normalized_name = normalize_name(name)
 
-    cursor.execute(
-        """
-        INSERT INTO birthdays (
-            chat_id,
-            chat_title,
-            name,
-            birth_year,
-            birth_month,
-            birth_day,
-            added_by_user_id,
-            added_by_name
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id, name)
-        DO UPDATE SET
-            birth_year = excluded.birth_year,
-            birth_month = excluded.birth_month,
-            birth_day = excluded.birth_day,
-            added_by_user_id = excluded.added_by_user_id,
-            added_by_name = excluded.added_by_name,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            chat_id,
-            chat_title,
-            name,
-            birth_year,
-            birth_month,
-            birth_day,
-            added_by_user_id,
-            added_by_name,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_all_birthdays(chat_id: int) -> List[sqlite3.Row]:
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT *
-        FROM birthdays
-        WHERE chat_id = ?
-        ORDER BY birth_month ASC, birth_day ASC, name ASC
-        """,
-        (chat_id,),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return rows
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO birthdays (
+                    chat_id,
+                    chat_title,
+                    name,
+                    name_key,
+                    birth_year,
+                    birth_month,
+                    birth_day,
+                    added_by_user_id,
+                    added_by_name
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(chat_id, name_key)
+                DO UPDATE SET
+                    chat_title = EXCLUDED.chat_title,
+                    name = EXCLUDED.name,
+                    birth_year = EXCLUDED.birth_year,
+                    birth_month = EXCLUDED.birth_month,
+                    birth_day = EXCLUDED.birth_day,
+                    added_by_user_id = EXCLUDED.added_by_user_id,
+                    added_by_name = EXCLUDED.added_by_name,
+                    updated_at = NOW()
+                """,
+                (
+                    chat_id,
+                    chat_title,
+                    normalized_name,
+                    name_key(normalized_name),
+                    birth_year,
+                    birth_month,
+                    birth_day,
+                    added_by_user_id,
+                    added_by_name,
+                ),
+            )
 
 
-def get_today_birthdays(chat_id: int) -> List[sqlite3.Row]:
-    today = date.today()
+def get_all_birthdays(chat_id: int) -> List[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM birthdays
+                WHERE chat_id = %s
+                ORDER BY birth_month ASC, birth_day ASC, name ASC
+                """,
+                (chat_id,),
+            )
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT *
-        FROM birthdays
-        WHERE chat_id = ?
-          AND birth_month = ?
-          AND birth_day = ?
-        ORDER BY name ASC
-        """,
-        (chat_id, today.month, today.day),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return rows
+            return cursor.fetchall()
 
 
-def get_next_birthdays(chat_id: int, limit: int = 5) -> List[sqlite3.Row]:
+def get_today_birthdays(chat_id: int) -> List[dict]:
+    today = today_local()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM birthdays
+                WHERE chat_id = %s
+                  AND birth_month = %s
+                  AND birth_day = %s
+                ORDER BY name ASC
+                """,
+                (chat_id, today.month, today.day),
+            )
+
+            return cursor.fetchall()
+
+
+def get_next_birthdays(chat_id: int, limit: int = 5) -> List[dict]:
     rows = get_all_birthdays(chat_id)
 
     rows = sorted(
@@ -359,23 +397,17 @@ def get_next_birthdays(chat_id: int, limit: int = 5) -> List[sqlite3.Row]:
 
 
 def remove_birthday(chat_id: int, name: str) -> bool:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM birthdays
+                WHERE chat_id = %s AND name_key = %s
+                """,
+                (chat_id, name_key(name)),
+            )
 
-    cursor.execute(
-        """
-        DELETE FROM birthdays
-        WHERE chat_id = ? AND LOWER(name) = LOWER(?)
-        """,
-        (chat_id, name),
-    )
-
-    deleted = cursor.rowcount > 0
-
-    conn.commit()
-    conn.close()
-
-    return deleted
+            return cursor.rowcount > 0
 
 
 # ------------------------------------------------------------
@@ -384,6 +416,16 @@ def remove_birthday(chat_id: int, name: str) -> bool:
 
 async def add_birthday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat:
+        return
+
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        init_birthday_db()
+    except Exception as error:
+        await update.message.reply_text(f"Birthday database init failed.\n\nError: {error}")
         return
 
     if len(context.args) < 2:
@@ -418,16 +460,20 @@ async def add_birthday_command(update: Update, context: ContextTypes.DEFAULT_TYP
     added_by_user_id = user.id if user else None
     added_by_name = get_display_name(user)
 
-    upsert_birthday(
-        chat_id=update.effective_chat.id,
-        chat_title=update.effective_chat.title or update.effective_chat.full_name or "",
-        name=name,
-        birth_year=birth_year,
-        birth_month=birth_month,
-        birth_day=birth_day,
-        added_by_user_id=added_by_user_id,
-        added_by_name=added_by_name,
-    )
+    try:
+        upsert_birthday(
+            chat_id=update.effective_chat.id,
+            chat_title=update.effective_chat.title or update.effective_chat.full_name or "",
+            name=name,
+            birth_year=birth_year,
+            birth_month=birth_month,
+            birth_day=birth_day,
+            added_by_user_id=added_by_user_id,
+            added_by_name=added_by_name,
+        )
+    except Exception as error:
+        await update.message.reply_text(f"Could not save birthday.\n\nError: {error}")
+        return
 
     if birth_year:
         birthday_display = f"{birth_year:04d}-{birth_month:02d}-{birth_day:02d}"
@@ -435,7 +481,7 @@ async def add_birthday_command(update: Update, context: ContextTypes.DEFAULT_TYP
         birthday_display = f"{birth_day:02d}-{birth_month:02d}"
 
     await update.message.reply_text(
-        f"Birthday saved 🎂\n\n"
+        f"Birthday saved permanently 🎂\n\n"
         f"Name: {name}\n"
         f"Birthday: {birthday_display}"
     )
@@ -445,7 +491,15 @@ async def birthdays_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message or not update.effective_chat:
         return
 
-    rows = get_all_birthdays(update.effective_chat.id)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        rows = get_all_birthdays(update.effective_chat.id)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load birthdays.\n\nError: {error}")
+        return
 
     if not rows:
         await update.message.reply_text(
@@ -470,7 +524,15 @@ async def next_birthday_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not update.message or not update.effective_chat:
         return
 
-    rows = get_next_birthdays(update.effective_chat.id, limit=5)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        rows = get_next_birthdays(update.effective_chat.id, limit=5)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load next birthdays.\n\nError: {error}")
+        return
 
     if not rows:
         await update.message.reply_text(
@@ -495,7 +557,15 @@ async def birthday_today_command(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message or not update.effective_chat:
         return
 
-    rows = get_today_birthdays(update.effective_chat.id)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        rows = get_today_birthdays(update.effective_chat.id)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load today's birthdays.\n\nError: {error}")
+        return
 
     if not rows:
         await update.message.reply_text("No birthdays today.")
@@ -521,6 +591,10 @@ async def remove_birthday_command(update: Update, context: ContextTypes.DEFAULT_
     if not update.message or not update.effective_chat:
         return
 
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
     if not context.args:
         await update.message.reply_text(
             "Please provide a name.\n\n"
@@ -530,7 +604,12 @@ async def remove_birthday_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     name = normalize_name(" ".join(context.args))
-    deleted = remove_birthday(update.effective_chat.id, name)
+
+    try:
+        deleted = remove_birthday(update.effective_chat.id, name)
+    except Exception as error:
+        await update.message.reply_text(f"Could not remove birthday.\n\nError: {error}")
+        return
 
     if deleted:
         await update.message.reply_text(f"Removed birthday for {name}.")
