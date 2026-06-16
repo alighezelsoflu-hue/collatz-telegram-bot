@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
+from modules.graph_math_module import register_graph_math_handlers
 
 from config import (
     TOKEN,
@@ -112,6 +113,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/polarplot 1 + sin(theta) range 0 6.28 - polar plot\n"
         "/paramplot cos(t); sin(t) range 0 6.28 - parametric plot\n"
         "/mathhelp - full math help\n\n"
+        "Graph theory:\n"
+        "/convexhull 0,0 1,2 2,1 0,3 3,0 - convex hull plot\n"
+        "/graphdraw A B; A C; B D - draw a graph\n"
+        "/dijkstra A D | A B 4; A C 2; C B 1; B D 5 - weighted shortest path\n"
+        "/shortestpath A E | A B; A C; B D; D E - unweighted shortest path\n"
+        "/mst A B 4; A C 2; C B 1; B D 5 - minimum spanning tree\n"
+        "/bfs A | A B; A C; B D - breadth-first search\n"
+        "/dfs A | A B; A C; B D - depth-first search\n"
+        "/components A B; B C; D E - connected components\n"
+        "/toposort shop cook; cook eat; study exam - topological sort\n"
+        "/bipartite A 1; A 2; B 1; B 2 - bipartite check\n"
+        "/cycle A B; B C; C A - cycle detection\n"
+        "/graphhelp - graph theory help\n\n"
         "World Cup:\n"
         "/wc_today - World Cup matches today\n"
         "/wc_tomorrow - World Cup matches tomorrow\n"
@@ -186,6 +200,18 @@ async def setup_bot_commands() -> None:
         BotCommand("primegap", "Prime gap plot"),
         BotCommand("polarplot", "Polar plot"),
         BotCommand("paramplot", "Parametric plot"),
+        BotCommand("convexhull", "Convex hull of points"),
+        BotCommand("graphdraw", "Draw a graph"),
+        BotCommand("dijkstra", "Weighted shortest path"),
+        BotCommand("shortestpath", "Unweighted shortest path"),
+        BotCommand("mst", "Minimum spanning tree"),
+        BotCommand("bfs", "Breadth-first search"),
+        BotCommand("dfs", "Depth-first search"),
+        BotCommand("components", "Connected components"),
+        BotCommand("toposort", "Topological sort"),
+        BotCommand("bipartite", "Check bipartite graph"),
+        BotCommand("cycle", "Detect graph cycle"),
+        BotCommand("graphhelp", "Graph theory help"),
         BotCommand("wc_today", "World Cup matches today"),
         BotCommand("wc_tomorrow", "World Cup matches tomorrow"),
         BotCommand("wc_live", "Live World Cup matches"),
@@ -233,6 +259,7 @@ def register_handlers() -> None:
     telegram_app.add_handler(CommandHandler("help", help_command))
 
     register_math_handlers(telegram_app)
+    register_graph_math_handlers(telegram_app)
 
     if register_fifa_handlers:
         register_fifa_handlers(telegram_app)
