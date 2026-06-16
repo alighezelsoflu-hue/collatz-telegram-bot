@@ -1,6 +1,5 @@
 import os
 import re
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
@@ -10,8 +9,19 @@ from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:
+    psycopg = None
+    dict_row = None
 
-DB_PATH = os.getenv("GROUP_ACTIVITY_DB_PATH", "group_activity.db")
+
+# ------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 GROUP_ACTIVITY_TIMEZONE = os.getenv("GROUP_ACTIVITY_TIMEZONE", "Europe/Berlin")
 
 try:
@@ -24,70 +34,100 @@ except Exception:
 # Database
 # ------------------------------------------------------------
 
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def database_is_configured() -> bool:
+    return bool(DATABASE_URL) and psycopg is not None
+
+
+def get_db_connection():
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is not installed. Add psycopg[binary] to requirements.txt and redeploy."
+        )
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is missing. Add your Neon Postgres connection string to Render."
+        )
+
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_activity_db() -> None:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    if not database_is_configured():
+        return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS group_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            chat_title TEXT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            display_name TEXT,
-            message_id INTEGER,
-            message_date_iso TEXT,
-            message_date_ts REAL,
-            local_date TEXT,
-            local_hour INTEGER,
-            local_weekday TEXT,
-            message_type TEXT,
-            word_count INTEGER DEFAULT 0,
-            char_count INTEGER DEFAULT 0,
-            emoji_count INTEGER DEFAULT 0,
-            has_link INTEGER DEFAULT 0,
-            is_reply INTEGER DEFAULT 0,
-            reply_to_user_id INTEGER,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS group_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    chat_title TEXT,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    first_name TEXT,
+                    last_name TEXT,
+                    display_name TEXT,
+                    message_id BIGINT,
+                    message_date_iso TEXT,
+                    message_date_ts DOUBLE PRECISION,
+                    local_date TEXT,
+                    local_hour INTEGER,
+                    local_weekday TEXT,
+                    message_type TEXT,
+                    word_count INTEGER DEFAULT 0,
+                    char_count INTEGER DEFAULT 0,
+                    emoji_count INTEGER DEFAULT 0,
+                    has_link INTEGER DEFAULT 0,
+                    is_reply INTEGER DEFAULT 0,
+                    reply_to_user_id BIGINT,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_group_chat_date "
-        "ON group_messages(chat_id, message_date_ts)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_group_chat_date
+                ON group_messages(chat_id, message_date_ts)
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_group_user_date "
-        "ON group_messages(chat_id, user_id, message_date_ts)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_group_user_date
+                ON group_messages(chat_id, user_id, message_date_ts)
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_group_type_date "
-        "ON group_messages(chat_id, message_type, message_date_ts)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_group_type_date
+                ON group_messages(chat_id, message_type, message_date_ts)
+                """
+            )
 
-    conn.commit()
-    conn.close()
 
-
-init_activity_db()
+try:
+    init_activity_db()
+except Exception as error:
+    print(f"Group activity database init failed: {error}")
 
 
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
+def db_error_text() -> str:
+    return (
+        "Group activity database is not ready.\n\n"
+        "Please check:\n"
+        "1. DATABASE_URL exists in Render Environment Variables\n"
+        "2. psycopg[binary] exists in requirements.txt\n"
+        "3. Render was redeployed after adding DATABASE_URL"
+    )
+
 
 def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
@@ -249,7 +289,7 @@ def get_period_start(period: str) -> Tuple[float, str]:
     return timestamp_from_local_start(start_local), label
 
 
-def format_member_name(row: sqlite3.Row) -> str:
+def format_member_name(row: dict) -> str:
     return row["display_name"] or row["username"] or row["first_name"] or str(row["user_id"])
 
 
@@ -269,6 +309,9 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if not is_group_chat(update):
+        return
+
+    if not database_is_configured():
         return
 
     user = update.effective_user
@@ -291,61 +334,60 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
 
     message_type = detect_message_type(message)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO group_messages (
-            chat_id,
-            chat_title,
-            user_id,
-            username,
-            first_name,
-            last_name,
-            display_name,
-            message_id,
-            message_date_iso,
-            message_date_ts,
-            local_date,
-            local_hour,
-            local_weekday,
-            message_type,
-            word_count,
-            char_count,
-            emoji_count,
-            has_link,
-            is_reply,
-            reply_to_user_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            chat.id,
-            chat.title or "",
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            user.last_name or "",
-            get_display_name(user),
-            message.message_id,
-            local_dt.isoformat(),
-            message.date.timestamp(),
-            local_dt.strftime("%Y-%m-%d"),
-            local_dt.hour,
-            local_dt.strftime("%A"),
-            message_type,
-            count_words(text),
-            len(text),
-            count_emojis(text),
-            1 if has_link(message, text) else 0,
-            is_reply,
-            reply_to_user_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO group_messages (
+                        chat_id,
+                        chat_title,
+                        user_id,
+                        username,
+                        first_name,
+                        last_name,
+                        display_name,
+                        message_id,
+                        message_date_iso,
+                        message_date_ts,
+                        local_date,
+                        local_hour,
+                        local_weekday,
+                        message_type,
+                        word_count,
+                        char_count,
+                        emoji_count,
+                        has_link,
+                        is_reply,
+                        reply_to_user_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        chat.id,
+                        chat.title or "",
+                        user.id,
+                        user.username or "",
+                        user.first_name or "",
+                        user.last_name or "",
+                        get_display_name(user),
+                        message.message_id,
+                        local_dt.isoformat(),
+                        message.date.timestamp(),
+                        local_dt.strftime("%Y-%m-%d"),
+                        local_dt.hour,
+                        local_dt.strftime("%A"),
+                        message_type,
+                        count_words(text),
+                        len(text),
+                        count_emojis(text),
+                        1 if has_link(message, text) else 0,
+                        is_reply,
+                        reply_to_user_id,
+                    ),
+                )
+    except Exception as error:
+        print(f"Group activity tracking failed: {error}")
 
 
 # ------------------------------------------------------------
@@ -355,64 +397,61 @@ async def track_group_activity(update: Update, context: ContextTypes.DEFAULT_TYP
 def get_basic_stats(chat_id: int, period: str) -> Dict:
     start_ts, label = get_period_start(period)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_messages,
+                    COUNT(DISTINCT user_id) AS active_members,
+                    COALESCE(SUM(word_count), 0) AS total_words,
+                    COALESCE(SUM(emoji_count), 0) AS total_emojis,
+                    COALESCE(SUM(has_link), 0) AS total_links,
+                    COALESCE(SUM(is_reply), 0) AS total_replies
+                FROM group_messages
+                WHERE chat_id = %s AND message_date_ts >= %s
+                """,
+                (chat_id, start_ts),
+            )
+            summary = cursor.fetchone()
 
-    cursor.execute(
-        """
-        SELECT
-            COUNT(*) AS total_messages,
-            COUNT(DISTINCT user_id) AS active_members,
-            COALESCE(SUM(word_count), 0) AS total_words,
-            COALESCE(SUM(emoji_count), 0) AS total_emojis,
-            COALESCE(SUM(has_link), 0) AS total_links,
-            COALESCE(SUM(is_reply), 0) AS total_replies
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        """,
-        (chat_id, start_ts),
-    )
-    summary = cursor.fetchone()
+            cursor.execute(
+                """
+                SELECT user_id, display_name, username, first_name, COUNT(*) AS message_count
+                FROM group_messages
+                WHERE chat_id = %s AND message_date_ts >= %s
+                GROUP BY user_id, display_name, username, first_name
+                ORDER BY message_count DESC
+                LIMIT 10
+                """,
+                (chat_id, start_ts),
+            )
+            top_users = cursor.fetchall()
 
-    cursor.execute(
-        """
-        SELECT user_id, display_name, COUNT(*) AS message_count
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        GROUP BY user_id, display_name
-        ORDER BY message_count DESC
-        LIMIT 10
-        """,
-        (chat_id, start_ts),
-    )
-    top_users = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT message_type, COUNT(*) AS count
+                FROM group_messages
+                WHERE chat_id = %s AND message_date_ts >= %s
+                GROUP BY message_type
+                ORDER BY count DESC
+                """,
+                (chat_id, start_ts),
+            )
+            content_types = cursor.fetchall()
 
-    cursor.execute(
-        """
-        SELECT message_type, COUNT(*) AS count
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        GROUP BY message_type
-        ORDER BY count DESC
-        """,
-        (chat_id, start_ts),
-    )
-    content_types = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT local_hour, COUNT(*) AS count
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        GROUP BY local_hour
-        ORDER BY count DESC
-        LIMIT 1
-        """,
-        (chat_id, start_ts),
-    )
-    peak_hour = cursor.fetchone()
-
-    conn.close()
+            cursor.execute(
+                """
+                SELECT local_hour, COUNT(*) AS count
+                FROM group_messages
+                WHERE chat_id = %s AND message_date_ts >= %s
+                GROUP BY local_hour
+                ORDER BY count DESC
+                LIMIT 1
+                """,
+                (chat_id, start_ts),
+            )
+            peak_hour = cursor.fetchone()
 
     return {
         "period_label": label,
@@ -423,72 +462,67 @@ def get_basic_stats(chat_id: int, period: str) -> Dict:
     }
 
 
-def get_leaderboard_rows(chat_id: int, period: str = "week", limit: int = 10) -> List[sqlite3.Row]:
+def get_leaderboard_rows(chat_id: int, period: str = "week", limit: int = 10) -> List[dict]:
     start_ts, _ = get_period_start(period)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    user_id,
+                    display_name,
+                    username,
+                    first_name,
+                    COUNT(*) AS message_count,
+                    COALESCE(SUM(word_count), 0) AS word_count,
+                    COALESCE(SUM(emoji_count), 0) AS emoji_count,
+                    COALESCE(SUM(has_link), 0) AS link_count,
+                    COALESCE(SUM(is_reply), 0) AS reply_count
+                FROM group_messages
+                WHERE chat_id = %s AND message_date_ts >= %s
+                GROUP BY user_id, display_name, username, first_name
+                ORDER BY message_count DESC
+                LIMIT %s
+                """,
+                (chat_id, start_ts, limit),
+            )
 
-    cursor.execute(
-        """
-        SELECT
-            user_id,
-            display_name,
-            COUNT(*) AS message_count,
-            COALESCE(SUM(word_count), 0) AS word_count,
-            COALESCE(SUM(emoji_count), 0) AS emoji_count,
-            COALESCE(SUM(has_link), 0) AS link_count,
-            COALESCE(SUM(is_reply), 0) AS reply_count
-        FROM group_messages
-        WHERE chat_id = ? AND message_date_ts >= ?
-        GROUP BY user_id, display_name
-        ORDER BY message_count DESC
-        LIMIT ?
-        """,
-        (chat_id, start_ts, limit),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return rows
+            return cursor.fetchall()
 
 
 def get_award_data(chat_id: int) -> Dict:
     start_ts, _ = get_period_start("week")
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
     queries = {
         "most_active": """
             SELECT display_name, COUNT(*) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ?
+            WHERE chat_id = %s AND message_date_ts >= %s
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
         """,
         "emoji_master": """
-            SELECT display_name, SUM(emoji_count) AS value
+            SELECT display_name, COALESCE(SUM(emoji_count), 0) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ?
+            WHERE chat_id = %s AND message_date_ts >= %s
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
         """,
         "link_hunter": """
-            SELECT display_name, SUM(has_link) AS value
+            SELECT display_name, COALESCE(SUM(has_link), 0) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ?
+            WHERE chat_id = %s AND message_date_ts >= %s
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
         """,
         "best_replier": """
-            SELECT display_name, SUM(is_reply) AS value
+            SELECT display_name, COALESCE(SUM(is_reply), 0) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ?
+            WHERE chat_id = %s AND message_date_ts >= %s
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
@@ -496,7 +530,7 @@ def get_award_data(chat_id: int) -> Dict:
         "photo_star": """
             SELECT display_name, COUNT(*) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ? AND message_type = 'photo'
+            WHERE chat_id = %s AND message_date_ts >= %s AND message_type = 'photo'
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
@@ -504,7 +538,7 @@ def get_award_data(chat_id: int) -> Dict:
         "night_owl": """
             SELECT display_name, COUNT(*) AS value
             FROM group_messages
-            WHERE chat_id = ? AND message_date_ts >= ? AND (local_hour >= 22 OR local_hour <= 4)
+            WHERE chat_id = %s AND message_date_ts >= %s AND (local_hour >= 22 OR local_hour <= 4)
             GROUP BY user_id, display_name
             ORDER BY value DESC
             LIMIT 1
@@ -513,11 +547,11 @@ def get_award_data(chat_id: int) -> Dict:
 
     result = {}
 
-    for key, sql in queries.items():
-        cursor.execute(sql, (chat_id, start_ts))
-        result[key] = cursor.fetchone()
-
-    conn.close()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            for key, sql in queries.items():
+                cursor.execute(sql, (chat_id, start_ts))
+                result[key] = cursor.fetchone()
 
     return result
 
@@ -542,7 +576,7 @@ def load_font(size: int = 24):
     return ImageFont.load_default()
 
 
-def create_leaderboard_chart(rows: List[sqlite3.Row], title: str) -> BytesIO:
+def create_leaderboard_chart(rows: List[dict], title: str) -> BytesIO:
     width = 1200
     height = 760
 
@@ -663,7 +697,7 @@ def build_activity_report(chat_title: str, stats: Dict) -> str:
     return "\n".join(lines)
 
 
-def build_leaderboard_text(rows: List[sqlite3.Row], period_label: str) -> str:
+def build_leaderboard_text(rows: List[dict], period_label: str) -> str:
     lines = [
         f"Leaderboard — {period_label}",
         "",
@@ -724,9 +758,17 @@ async def activity_today_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(error)
         return
 
-    stats = get_basic_stats(update.effective_chat.id, "today")
-    text = build_activity_report(update.effective_chat.title or "This group", stats)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        stats = get_basic_stats(update.effective_chat.id, "today")
+    except Exception as error:
+        await update.message.reply_text(f"Could not load activity report.\n\nError: {error}")
+        return
+
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
     await update.message.reply_text(text)
 
 
@@ -739,9 +781,17 @@ async def activity_week_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(error)
         return
 
-    stats = get_basic_stats(update.effective_chat.id, "week")
-    text = build_activity_report(update.effective_chat.title or "This group", stats)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        stats = get_basic_stats(update.effective_chat.id, "week")
+    except Exception as error:
+        await update.message.reply_text(f"Could not load activity report.\n\nError: {error}")
+        return
+
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
     await update.message.reply_text(text)
 
 
@@ -754,9 +804,17 @@ async def activity_month_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(error)
         return
 
-    stats = get_basic_stats(update.effective_chat.id, "month")
-    text = build_activity_report(update.effective_chat.title or "This group", stats)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        stats = get_basic_stats(update.effective_chat.id, "month")
+    except Exception as error:
+        await update.message.reply_text(f"Could not load activity report.\n\nError: {error}")
+        return
+
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
     await update.message.reply_text(text)
 
 
@@ -769,9 +827,17 @@ async def activity_year_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(error)
         return
 
-    stats = get_basic_stats(update.effective_chat.id, "year")
-    text = build_activity_report(update.effective_chat.title or "This group", stats)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        stats = get_basic_stats(update.effective_chat.id, "year")
+    except Exception as error:
+        await update.message.reply_text(f"Could not load activity report.\n\nError: {error}")
+        return
+
+    text = build_activity_report(update.effective_chat.title or "This group", stats)
     await update.message.reply_text(text)
 
 
@@ -784,9 +850,17 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(error)
         return
 
-    rows = get_leaderboard_rows(update.effective_chat.id, "week", limit=10)
-    text = build_leaderboard_text(rows, "last 7 days")
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        rows = get_leaderboard_rows(update.effective_chat.id, "week", limit=10)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load leaderboard.\n\nError: {error}")
+        return
+
+    text = build_leaderboard_text(rows, "last 7 days")
     await update.message.reply_text(text)
 
 
@@ -799,8 +873,16 @@ async def activity_chart_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(error)
         return
 
-    rows = get_leaderboard_rows(update.effective_chat.id, "week", limit=10)
-    chart = create_leaderboard_chart(rows, "Group Activity Leaderboard — Last 7 Days")
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        rows = get_leaderboard_rows(update.effective_chat.id, "week", limit=10)
+        chart = create_leaderboard_chart(rows, "Group Activity Leaderboard — Last 7 Days")
+    except Exception as error:
+        await update.message.reply_text(f"Could not create activity chart.\n\nError: {error}")
+        return
 
     await update.message.reply_photo(
         photo=InputFile(chart, filename="activity_chart.png"),
@@ -817,9 +899,17 @@ async def awards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(error)
         return
 
-    awards = get_award_data(update.effective_chat.id)
-    text = build_awards_text(awards)
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
 
+    try:
+        awards = get_award_data(update.effective_chat.id)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load awards.\n\nError: {error}")
+        return
+
+    text = build_awards_text(awards)
     await update.message.reply_text(text)
 
 

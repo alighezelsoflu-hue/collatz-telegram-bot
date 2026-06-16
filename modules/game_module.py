@@ -1,21 +1,27 @@
 import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:
+    psycopg = None
+    dict_row = None
+
 
 # ------------------------------------------------------------
 # Settings
 # ------------------------------------------------------------
 
-GAME_DB_PATH = os.getenv("GAME_DB_PATH", "games.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # Active dart battles are stored in memory.
 # If Render restarts during a battle, only the active battle is lost.
-# Scores and leaderboard are saved in SQLite.
+# Scores and leaderboard are saved permanently in Neon Postgres.
 ACTIVE_DART_BATTLES: Dict[int, Dict] = {}
 
 
@@ -23,75 +29,103 @@ ACTIVE_DART_BATTLES: Dict[int, Dict] = {}
 # Database
 # ------------------------------------------------------------
 
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(GAME_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def database_is_configured() -> bool:
+    return bool(DATABASE_URL) and psycopg is not None
+
+
+def get_db_connection():
+    if psycopg is None:
+        raise RuntimeError(
+            "psycopg is not installed. Add psycopg[binary] to requirements.txt and redeploy."
+        )
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is missing. Add your Neon Postgres connection string to Render."
+        )
+
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def init_game_db() -> None:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    if not database_is_configured():
+        return
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dart_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            chat_title TEXT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            display_name TEXT,
-            total_throws INTEGER DEFAULT 0,
-            total_score INTEGER DEFAULT 0,
-            bullseyes INTEGER DEFAULT 0,
-            battle_wins INTEGER DEFAULT 0,
-            battles_played INTEGER DEFAULT 0,
-            last_played_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(chat_id, user_id)
-        )
-        """
-    )
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dart_scores (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    chat_title TEXT,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    display_name TEXT,
+                    total_throws INTEGER DEFAULT 0,
+                    total_score INTEGER DEFAULT 0,
+                    bullseyes INTEGER DEFAULT 0,
+                    battle_wins INTEGER DEFAULT 0,
+                    battles_played INTEGER DEFAULT 0,
+                    last_played_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(chat_id, user_id)
+                )
+                """
+            )
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS dart_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            chat_title TEXT,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            display_name TEXT,
-            score INTEGER NOT NULL,
-            is_bullseye INTEGER DEFAULT 0,
-            game_type TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dart_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id BIGINT NOT NULL,
+                    chat_title TEXT,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    display_name TEXT,
+                    score INTEGER NOT NULL,
+                    is_bullseye INTEGER DEFAULT 0,
+                    game_type TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dart_scores_chat "
-        "ON dart_scores(chat_id)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dart_scores_chat
+                ON dart_scores(chat_id)
+                """
+            )
 
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_dart_history_chat_date "
-        "ON dart_history(chat_id, created_at)"
-    )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dart_history_chat_date
+                ON dart_history(chat_id, created_at)
+                """
+            )
 
-    conn.commit()
-    conn.close()
 
-
-init_game_db()
+try:
+    init_game_db()
+except Exception as error:
+    print(f"Game database init failed: {error}")
 
 
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
+
+def db_error_text() -> str:
+    return (
+        "Game database is not ready.\n\n"
+        "Please check:\n"
+        "1. DATABASE_URL exists in Render Environment Variables\n"
+        "2. psycopg[binary] exists in requirements.txt\n"
+        "3. Render was redeployed after adding DATABASE_URL"
+    )
+
 
 def get_display_name(user) -> str:
     if not user:
@@ -127,8 +161,8 @@ def get_chat_title(update: Update) -> str:
     return chat.title or chat.full_name or ""
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def dart_help_text() -> str:
@@ -146,9 +180,14 @@ def dart_help_text() -> str:
         "- Telegram dart score is from 1 to 6\n"
         "- 6 is bullseye 🎯\n"
         "- In dart battle, highest score wins\n"
-        "- If multiple players tie for highest score, all tied players get a win"
+        "- If multiple players tie for highest score, all tied players get a win\n"
+        "- Scores are saved permanently in Neon Postgres"
     )
 
+
+# ------------------------------------------------------------
+# Database operations
+# ------------------------------------------------------------
 
 def record_dart_throw(
     chat_id: int,
@@ -165,129 +204,118 @@ def record_dart_throw(
     played_increment = 1 if battle_played else 0
     win_increment = 1 if battle_win else 0
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO dart_scores (
+                    chat_id,
+                    chat_title,
+                    user_id,
+                    username,
+                    display_name,
+                    total_throws,
+                    total_score,
+                    bullseyes,
+                    battle_wins,
+                    battles_played,
+                    last_played_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(chat_id, user_id)
+                DO UPDATE SET
+                    chat_title = EXCLUDED.chat_title,
+                    username = EXCLUDED.username,
+                    display_name = EXCLUDED.display_name,
+                    total_throws = dart_scores.total_throws + EXCLUDED.total_throws,
+                    total_score = dart_scores.total_score + EXCLUDED.total_score,
+                    bullseyes = dart_scores.bullseyes + EXCLUDED.bullseyes,
+                    battle_wins = dart_scores.battle_wins + EXCLUDED.battle_wins,
+                    battles_played = dart_scores.battles_played + EXCLUDED.battles_played,
+                    last_played_at = EXCLUDED.last_played_at,
+                    updated_at = NOW()
+                """,
+                (
+                    chat_id,
+                    chat_title,
+                    user_id,
+                    username,
+                    display_name,
+                    1,
+                    score,
+                    is_bullseye,
+                    win_increment,
+                    played_increment,
+                    now_utc(),
+                ),
+            )
 
-    cursor.execute(
-        """
-        INSERT INTO dart_scores (
-            chat_id,
-            chat_title,
-            user_id,
-            username,
-            display_name,
-            total_throws,
-            total_score,
-            bullseyes,
-            battle_wins,
-            battles_played,
-            last_played_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id, user_id)
-        DO UPDATE SET
-            chat_title = excluded.chat_title,
-            username = excluded.username,
-            display_name = excluded.display_name,
-            total_throws = total_throws + excluded.total_throws,
-            total_score = total_score + excluded.total_score,
-            bullseyes = bullseyes + excluded.bullseyes,
-            battle_wins = battle_wins + excluded.battle_wins,
-            battles_played = battles_played + excluded.battles_played,
-            last_played_at = excluded.last_played_at,
-            updated_at = CURRENT_TIMESTAMP
-        """,
-        (
-            chat_id,
-            chat_title,
-            user_id,
-            username,
-            display_name,
-            1,
-            score,
-            is_bullseye,
-            win_increment,
-            played_increment,
-            now_iso(),
-        ),
-    )
-
-    cursor.execute(
-        """
-        INSERT INTO dart_history (
-            chat_id,
-            chat_title,
-            user_id,
-            username,
-            display_name,
-            score,
-            is_bullseye,
-            game_type
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            chat_id,
-            chat_title,
-            user_id,
-            username,
-            display_name,
-            score,
-            is_bullseye,
-            game_type,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
+            cursor.execute(
+                """
+                INSERT INTO dart_history (
+                    chat_id,
+                    chat_title,
+                    user_id,
+                    username,
+                    display_name,
+                    score,
+                    is_bullseye,
+                    game_type
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    chat_id,
+                    chat_title,
+                    user_id,
+                    username,
+                    display_name,
+                    score,
+                    is_bullseye,
+                    game_type,
+                ),
+            )
 
 
-def get_user_dart_score(chat_id: int, user_id: int) -> Optional[sqlite3.Row]:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_user_dart_score(chat_id: int, user_id: int) -> Optional[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM dart_scores
+                WHERE chat_id = %s AND user_id = %s
+                """,
+                (chat_id, user_id),
+            )
 
-    cursor.execute(
-        """
-        SELECT *
-        FROM dart_scores
-        WHERE chat_id = ? AND user_id = ?
-        """,
-        (chat_id, user_id),
-    )
-
-    row = cursor.fetchone()
-    conn.close()
-
-    return row
+            return cursor.fetchone()
 
 
-def get_dart_top(chat_id: int, limit: int = 10) -> List[sqlite3.Row]:
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def get_dart_top(chat_id: int, limit: int = 10) -> List[dict]:
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    *,
+                    CASE
+                        WHEN total_throws > 0
+                        THEN ROUND((total_score::numeric / total_throws), 2)
+                        ELSE 0
+                    END AS average_score
+                FROM dart_scores
+                WHERE chat_id = %s
+                ORDER BY battle_wins DESC, bullseyes DESC, average_score DESC, total_score DESC
+                LIMIT %s
+                """,
+                (chat_id, limit),
+            )
 
-    cursor.execute(
-        """
-        SELECT
-            *,
-            CASE
-                WHEN total_throws > 0 THEN ROUND(CAST(total_score AS REAL) / total_throws, 2)
-                ELSE 0
-            END AS average_score
-        FROM dart_scores
-        WHERE chat_id = ?
-        ORDER BY battle_wins DESC, bullseyes DESC, average_score DESC, total_score DESC
-        LIMIT ?
-        """,
-        (chat_id, limit),
-    )
-
-    rows = cursor.fetchall()
-    conn.close()
-
-    return rows
+            return cursor.fetchall()
 
 
-def format_score_row(row: sqlite3.Row, index: Optional[int] = None) -> str:
+def format_score_row(row: dict, index: Optional[int] = None) -> str:
     prefix = ""
 
     if index is not None:
@@ -315,23 +343,37 @@ async def dart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message or not update.effective_chat or not update.effective_user:
         return
 
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        init_game_db()
+    except Exception as error:
+        await update.message.reply_text(f"Game database init failed.\n\nError: {error}")
+        return
+
     user = update.effective_user
     chat = update.effective_chat
 
     sent = await update.message.reply_dice(emoji="🎯")
     score = sent.dice.value if sent.dice else 0
 
-    record_dart_throw(
-        chat_id=chat.id,
-        chat_title=get_chat_title(update),
-        user_id=user.id,
-        username=get_username(user),
-        display_name=get_display_name(user),
-        score=score,
-        game_type="solo",
-        battle_played=False,
-        battle_win=False,
-    )
+    try:
+        record_dart_throw(
+            chat_id=chat.id,
+            chat_title=get_chat_title(update),
+            user_id=user.id,
+            username=get_username(user),
+            display_name=get_display_name(user),
+            score=score,
+            game_type="solo",
+            battle_played=False,
+            battle_win=False,
+        )
+    except Exception as error:
+        await update.message.reply_text(f"Dart score could not be saved.\n\nError: {error}")
+        return
 
     if score == 6:
         result_text = f"{get_display_name(user)} hit bullseye! 🎯🔥\nScore: {score}"
@@ -343,6 +385,10 @@ async def dart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def dart_battle_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.effective_chat or not update.effective_user:
+        return
+
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
         return
 
     chat = update.effective_chat
@@ -419,6 +465,16 @@ async def start_dart_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not update.effective_chat:
         return
 
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
+    try:
+        init_game_db()
+    except Exception as error:
+        await update.message.reply_text(f"Game database init failed.\n\nError: {error}")
+        return
+
     chat = update.effective_chat
 
     if chat.id not in ACTIVE_DART_BATTLES:
@@ -448,6 +504,7 @@ async def start_dart_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     results = []
 
     for player in players:
+        await update.message.reply_text(f"{player['display_name']} throws 🎯")
         sent = await update.message.reply_dice(emoji="🎯")
         score = sent.dice.value if sent.dice else 0
 
@@ -461,22 +518,26 @@ async def start_dart_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     highest_score = max(result["score"] for result in results)
     winners = [result for result in results if result["score"] == highest_score]
 
-    for result in results:
-        player = result["player"]
-        score = result["score"]
-        is_winner = score == highest_score
+    try:
+        for result in results:
+            player = result["player"]
+            score = result["score"]
+            is_winner = score == highest_score
 
-        record_dart_throw(
-            chat_id=chat.id,
-            chat_title=battle["chat_title"],
-            user_id=player["user_id"],
-            username=player["username"],
-            display_name=player["display_name"],
-            score=score,
-            game_type="battle",
-            battle_played=True,
-            battle_win=is_winner,
-        )
+            record_dart_throw(
+                chat_id=chat.id,
+                chat_title=battle["chat_title"],
+                user_id=player["user_id"],
+                username=player["username"],
+                display_name=player["display_name"],
+                score=score,
+                game_type="battle",
+                battle_played=True,
+                battle_win=is_winner,
+            )
+    except Exception as error:
+        await update.message.reply_text(f"Battle scores could not be saved.\n\nError: {error}")
+        return
 
     lines = [
         "Dart battle result 🎯🏆",
@@ -525,10 +586,18 @@ async def dart_score_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not update.effective_chat or not update.effective_user:
         return
 
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
     chat = update.effective_chat
     user = update.effective_user
 
-    row = get_user_dart_score(chat.id, user.id)
+    try:
+        row = get_user_dart_score(chat.id, user.id)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load dart stats.\n\nError: {error}")
+        return
 
     if not row:
         await update.message.reply_text(
@@ -557,8 +626,17 @@ async def dart_top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message or not update.effective_chat:
         return
 
+    if not database_is_configured():
+        await update.message.reply_text(db_error_text())
+        return
+
     chat = update.effective_chat
-    rows = get_dart_top(chat.id, limit=10)
+
+    try:
+        rows = get_dart_top(chat.id, limit=10)
+    except Exception as error:
+        await update.message.reply_text(f"Could not load dart scoreboard.\n\nError: {error}")
+        return
 
     if not rows:
         await update.message.reply_text(
