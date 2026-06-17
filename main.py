@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from modules.graph_math_module import register_graph_math_handlers
+from modules.data_science_module import register_data_science_handlers
 
 from config import (
     TOKEN,
@@ -126,6 +127,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/bipartite A 1; A 2; B 1; B 2 - bipartite check\n"
         "/cycle A B; B C; C A - cycle detection\n"
         "/graphhelp - graph theory help\n\n"
+        "Data science:"
+        "/data_summary 4,7,9,10,10,12 - descriptive statistics"
+        "/histogram 4,5,5,6,7,8,8,9 - histogram image"
+        "/boxplot 3,4,5,5,6,7,8,20 - box plot image"
+        "/correlation 1,2; 2,4; 3,5; 4,8 - Pearson correlation"
+        "/linear_regression 1,2; 2,4; 3,5; 4,8 - regression plot"
+        "/kmeans 2 | 1,1; 1,2; 8,8; 9,8 - k-means clustering"
+        "/outliers iqr | 3,4,5,5,6,7,8,20 - outliers"
+        "/normalize minmax | 10,20,30,40 - normalize values"
+        "/confusion_matrix cat,cat; dog,cat; dog,dog - classification metrics"
+        "/csv_analyze - analyze a CSV file"
+        "/dshelp - data science help"
         "World Cup:\n"
         "/wc_today - World Cup matches today\n"
         "/wc_tomorrow - World Cup matches tomorrow\n"
@@ -212,6 +225,17 @@ async def setup_bot_commands() -> None:
         BotCommand("bipartite", "Check bipartite graph"),
         BotCommand("cycle", "Detect graph cycle"),
         BotCommand("graphhelp", "Graph theory help"),
+        BotCommand("data_summary", "Data summary statistics"),
+        BotCommand("histogram", "Create histogram"),
+        BotCommand("boxplot", "Create box plot"),
+        BotCommand("correlation", "Pearson correlation"),
+        BotCommand("linear_regression", "Linear regression"),
+        BotCommand("kmeans", "K-means clustering"),
+        BotCommand("outliers", "Detect outliers"),
+        BotCommand("normalize", "Normalize values"),
+        BotCommand("confusion_matrix", "Classification metrics"),
+        BotCommand("csv_analyze", "Analyze CSV file"),
+        BotCommand("dshelp", "Data science help"),
         BotCommand("wc_today", "World Cup matches today"),
         BotCommand("wc_tomorrow", "World Cup matches tomorrow"),
         BotCommand("wc_live", "Live World Cup matches"),
@@ -260,6 +284,7 @@ def register_handlers() -> None:
 
     register_math_handlers(telegram_app)
     register_graph_math_handlers(telegram_app)
+    register_data_science_handlers(telegram_app)
 
     if register_fifa_handlers:
         register_fifa_handlers(telegram_app)
