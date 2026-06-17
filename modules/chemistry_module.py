@@ -21,6 +21,165 @@ MAX_GAS_POINTS = 500
 
 
 # ------------------------------------------------------------
+# Optional AI explanation integration
+# ------------------------------------------------------------
+
+CHEMISTRY_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
+
+try:
+    from modules.ai_module import call_ai, AIProviderError
+except Exception:
+    call_ai = None
+
+    class AIProviderError(Exception):
+        pass
+
+
+def split_long_text(text: str, limit: int = 3500) -> List[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: List[str] = []
+    current = ""
+    for line in text.splitlines():
+        if len(current) + len(line) + 1 > limit:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def split_chemistry_ai_request(args: List[str]) -> Tuple[List[str], bool]:
+    """Remove optional AI trigger words from a chemistry command."""
+    cleaned: List[str] = []
+    wants_ai = False
+
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in CHEMISTRY_AI_TRIGGER_WORDS:
+            wants_ai = True
+            continue
+        cleaned.append(arg)
+
+    return cleaned, wants_ai
+
+
+async def send_chemistry_ai_explanation(
+    update: Update,
+    command_name: str,
+    user_input: str,
+    deterministic_context: str = "",
+) -> None:
+    if not update.message:
+        return
+
+    if call_ai is None:
+        await update.message.reply_text(
+            "AI explanation is not available because modules.ai_module could not be imported."
+        )
+        return
+
+    user_input = user_input.strip()
+    deterministic_context = deterministic_context.strip()
+
+    if deterministic_context and len(deterministic_context) > 2500:
+        deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
+
+    system_prompt = (
+        "You are AhBashin Bot's chemistry tutor. Explain chemistry calculator results clearly, briefly, "
+        "and accurately for a student. The deterministic chemistry module already performed the "
+        "calculation, so do not override or contradict it. Explain formulas, units, assumptions, "
+        "and safety/limitations when relevant. Keep the answer concise."
+    )
+
+    prompt_parts = [
+        f"Chemistry command: /{command_name}",
+        f"User input: {user_input or '(no input)'}",
+    ]
+
+    if deterministic_context:
+        prompt_parts.append(f"Result/context from the chemistry module:\n{deterministic_context}")
+
+    prompt_parts.append(
+        "Explain what this chemistry result means, which formula or concept is involved, "
+        "and how the user should interpret it. For plots, explain the axes and relationship shown."
+    )
+
+    try:
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+    except Exception as error:
+        await update.message.reply_text(f"AI chemistry explanation error.\n\nError: {error}")
+        return
+
+    text = "AI chemistry explanation 🧠🧪\n\n" + explanation
+    for chunk in split_long_text(text, limit=3500):
+        await update.message.reply_text(chunk)
+
+
+def chemistry_ai_wrapper(command_name: str, handler):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        original_args = list(getattr(context, "args", []) or [])
+        cleaned_args, wants_ai = split_chemistry_ai_request(original_args)
+        context.args = cleaned_args
+
+        try:
+            await handler(update, context)
+        finally:
+            context.args = original_args
+
+        if wants_ai:
+            await send_chemistry_ai_explanation(
+                update,
+                command_name=command_name,
+                user_input=" ".join(cleaned_args),
+            )
+
+    return wrapped
+
+
+async def chemistry_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explain a chemistry request/result using AI.
+
+    Usage:
+    /chem_ai explain molarity
+    or reply to a chemistry result/plot caption with /chem_ai
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Chemistry AI usage:\n\n"
+            "Add ai/explain to a chemistry command:\n"
+            "/molar_mass Ca(OH)2 explain\n"
+            "/balance C3H8 + O2 -> CO2 + H2O ai\n\n"
+            "Or reply to a chemistry result with:\n"
+            "/chem_ai"
+        )
+        return
+
+    await send_chemistry_ai_explanation(
+        update,
+        command_name="chem_ai",
+        user_input=text,
+        deterministic_context=text,
+    )
+
+
+# ------------------------------------------------------------
 # Periodic table data
 # atomic number, symbol, name, atomic mass, group, period, category
 # Atomic masses are standard approximate values, enough for calculator use.
@@ -174,6 +333,10 @@ def chemistry_help_text() -> str:
         "/ph H=1e-7 - pH from H+ concentration\n"
         "/ph OH=1e-3 - pH from OH- concentration\n"
         "/gasplot P V n=1 T=300 - ideal gas P vs V plot\n\n"
+        "AI explanation:\n"
+        "Add ai/explain to any chemistry command, example:\n"
+        "/molar_mass Ca(OH)2 explain\n"
+        "/chem_ai - explain a replied chemistry result\n\n"
         "Units used by default:\n"
         "P = atm, V = L, n = mol, T = K, R = 0.082057 L·atm/(mol·K)\n\n"
         "Tip: keep formulas compact, example: C6H12O6, Fe2(SO4)3, Ca(OH)2"
@@ -948,12 +1111,19 @@ async def gasplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def register_chemistry_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("chemhelp", chemhelp_command))
-    app.add_handler(CommandHandler("element", element_command))
-    app.add_handler(CommandHandler("molar_mass", molar_mass_command))
-    app.add_handler(CommandHandler("molarmass", molar_mass_command))
-    app.add_handler(CommandHandler("balance", balance_command))
-    app.add_handler(CommandHandler("idealgas", idealgas_command))
-    app.add_handler(CommandHandler("molarity", molarity_command))
-    app.add_handler(CommandHandler("dilution", dilution_command))
-    app.add_handler(CommandHandler("ph", ph_command))
-    app.add_handler(CommandHandler("gasplot", gasplot_command))
+    app.add_handler(CommandHandler("chem_ai", chemistry_ai_command))
+    app.add_handler(CommandHandler("chemai", chemistry_ai_command))
+
+    def add(names: List[str], handler, command_name: str) -> None:
+        wrapped = chemistry_ai_wrapper(command_name, handler)
+        for name in names:
+            app.add_handler(CommandHandler(name, wrapped))
+
+    add(["element"], element_command, "element")
+    add(["molar_mass", "molarmass"], molar_mass_command, "molar_mass")
+    add(["balance"], balance_command, "balance")
+    add(["idealgas"], idealgas_command, "idealgas")
+    add(["molarity"], molarity_command, "molarity")
+    add(["dilution"], dilution_command, "dilution")
+    add(["ph"], ph_command, "ph")
+    add(["gasplot"], gasplot_command, "gasplot")

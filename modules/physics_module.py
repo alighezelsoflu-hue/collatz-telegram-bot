@@ -1,5 +1,5 @@
 """
-Physics module for LakLak Telegram Bot.
+Physics module for AhBashin Telegram Bot.
 
 Lightweight implementation using only standard Python + Pillow.
 No numpy, scipy, matplotlib, or sklearn required.
@@ -187,6 +187,152 @@ def split_long_text(text: str, limit: int = 3500) -> List[str]:
     if current:
         chunks.append(current)
     return chunks
+
+
+# ------------------------------------------------------------
+# Optional AI explanation integration
+# ------------------------------------------------------------
+
+PHYSICS_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
+
+try:
+    from modules.ai_module import call_ai, AIProviderError
+except Exception:
+    call_ai = None
+
+    class AIProviderError(Exception):
+        pass
+
+
+def split_physics_ai_request(args: Sequence[str]) -> Tuple[List[str], bool]:
+    """Remove optional AI trigger words from a physics command.
+
+    Examples:
+    /projectile speed=20 angle=45 explain -> normal physics result + AI explanation
+    /ohm V=12 R=4 ai -> normal Ohm result + AI explanation
+    """
+    cleaned: List[str] = []
+    wants_ai = False
+
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in PHYSICS_AI_TRIGGER_WORDS:
+            wants_ai = True
+            continue
+        cleaned.append(arg)
+
+    return cleaned, wants_ai
+
+
+async def send_physics_ai_explanation(
+    update: Update,
+    command_name: str,
+    user_input: str,
+    deterministic_context: str = "",
+) -> None:
+    if not update.message:
+        return
+
+    if call_ai is None:
+        await update.message.reply_text(
+            "AI explanation is not available because modules.ai_module could not be imported."
+        )
+        return
+
+    user_input = user_input.strip()
+    deterministic_context = deterministic_context.strip()
+
+    if deterministic_context and len(deterministic_context) > 2500:
+        deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
+
+    system_prompt = (
+        "You are AhBashin Bot's physics tutor. Explain physics calculator results clearly, briefly, "
+        "and accurately for a student. The deterministic physics module already performed the "
+        "calculation, so do not override or contradict it. Explain units, formulas, assumptions, "
+        "and how to interpret plots when relevant. Keep the answer concise."
+    )
+
+    prompt_parts = [
+        f"Physics command: /{command_name}",
+        f"User input: {user_input or '(no input)'}",
+    ]
+
+    if deterministic_context:
+        prompt_parts.append(f"Result/context from the physics module:\n{deterministic_context}")
+
+    prompt_parts.append(
+        "Explain what this physics result means, which formula or concept is involved, "
+        "and how the user should interpret it. For plots, explain the axes, curve shape, and important features."
+    )
+
+    try:
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+    except Exception as error:
+        await update.message.reply_text(f"AI physics explanation error.\n\nError: {error}")
+        return
+
+    text = "AI physics explanation 🧠⚛️\n\n" + explanation
+    for chunk in split_long_text(text, limit=3500):
+        await update.message.reply_text(chunk)
+
+
+def physics_ai_wrapper(command_name: str, handler):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        original_args = list(getattr(context, "args", []) or [])
+        cleaned_args, wants_ai = split_physics_ai_request(original_args)
+        context.args = cleaned_args
+
+        try:
+            await handler(update, context)
+        finally:
+            context.args = original_args
+
+        if wants_ai:
+            await send_physics_ai_explanation(
+                update,
+                command_name=command_name,
+                user_input=" ".join(cleaned_args),
+            )
+
+    return wrapped
+
+
+async def physics_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explain a physics request/result using AI.
+
+    Usage:
+    /physics_ai explain projectile motion
+    or reply to a physics result/plot caption with /physics_ai
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Physics AI usage:\n\n"
+            "Add ai/explain to a physics command:\n"
+            "/projectile speed=20 angle=45 explain\n"
+            "/ohm V=12 R=4 ai\n\n"
+            "Or reply to a physics result with:\n"
+            "/physics_ai"
+        )
+        return
+
+    await send_physics_ai_explanation(
+        update,
+        command_name="physics_ai",
+        user_input=text,
+        deterministic_context=text,
+    )
 
 
 # ------------------------------------------------------------
@@ -418,6 +564,10 @@ def physics_help_text() -> str:
         "/gravityplot m1=5.97e24 m2=70 rmin=6.37e6 rmax=5e7\n"
         "/convert 10 m/s to km/h\n"
         "/convert 25 c to k\n\n"
+        "AI explanation:\n"
+        "Add ai/explain to any physics command, example:\n"
+        "/projectile speed=20 angle=45 explain\n"
+        "/physics_ai - explain a replied physics result\n\n"
         "Units are SI by default unless a converter unit is given."
     )
 
@@ -1309,32 +1459,37 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def register_physics_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("physicshelp", physics_help_command))
+    app.add_handler(CommandHandler("physics_ai", physics_ai_command))
+    app.add_handler(CommandHandler("physicsai", physics_ai_command))
 
-    app.add_handler(CommandHandler("kinematics", kinematics_command))
-    app.add_handler(CommandHandler("motionplot", motionplot_command))
-    app.add_handler(CommandHandler("projectile", projectile_command))
-    app.add_handler(CommandHandler("projectileplot", projectileplot_command))
+    def add(name: str, handler, command_name: str) -> None:
+        app.add_handler(CommandHandler(name, physics_ai_wrapper(command_name, handler)))
 
-    app.add_handler(CommandHandler("force", force_command))
-    app.add_handler(CommandHandler("weight", weight_command))
-    app.add_handler(CommandHandler("friction", friction_command))
-    app.add_handler(CommandHandler("kinetic", kinetic_command))
-    app.add_handler(CommandHandler("potential", potential_command))
-    app.add_handler(CommandHandler("momentum", momentum_command))
+    add("kinematics", kinematics_command, "kinematics")
+    add("motionplot", motionplot_command, "motionplot")
+    add("projectile", projectile_command, "projectile")
+    add("projectileplot", projectileplot_command, "projectileplot")
 
-    app.add_handler(CommandHandler("wave", wave_command))
-    app.add_handler(CommandHandler("waveplot", waveplot_command))
+    add("force", force_command, "force")
+    add("weight", weight_command, "weight")
+    add("friction", friction_command, "friction")
+    add("kinetic", kinetic_command, "kinetic")
+    add("potential", potential_command, "potential")
+    add("momentum", momentum_command, "momentum")
 
-    app.add_handler(CommandHandler("ohm", ohm_command))
-    app.add_handler(CommandHandler("series", series_command))
-    app.add_handler(CommandHandler("parallel", parallel_command))
+    add("wave", wave_command, "wave")
+    add("waveplot", waveplot_command, "waveplot")
 
-    app.add_handler(CommandHandler("spring", spring_command))
-    app.add_handler(CommandHandler("shmplot", shmplot_command))
+    add("ohm", ohm_command, "ohm")
+    add("series", series_command, "series")
+    add("parallel", parallel_command, "parallel")
 
-    app.add_handler(CommandHandler("lens", lens_command))
+    add("spring", spring_command, "spring")
+    add("shmplot", shmplot_command, "shmplot")
 
-    app.add_handler(CommandHandler("gravity", gravity_command))
-    app.add_handler(CommandHandler("gravityplot", gravityplot_command))
+    add("lens", lens_command, "lens")
 
-    app.add_handler(CommandHandler("convert", convert_command))
+    add("gravity", gravity_command, "gravity")
+    add("gravityplot", gravityplot_command, "gravityplot")
+
+    add("convert", convert_command, "convert")

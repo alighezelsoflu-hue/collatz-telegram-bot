@@ -25,6 +25,165 @@ G_CONST = 6.67430e-11
 MAX_DISTANCE_VALUE = 1e30
 
 
+# ------------------------------------------------------------
+# Optional AI explanation integration
+# ------------------------------------------------------------
+
+ASTRO_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
+
+try:
+    from modules.ai_module import call_ai, AIProviderError
+except Exception:
+    call_ai = None
+
+    class AIProviderError(Exception):
+        pass
+
+
+def split_long_text(text: str, limit: int = 3500) -> List[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: List[str] = []
+    current = ""
+    for line in text.splitlines():
+        if len(current) + len(line) + 1 > limit:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def split_astro_ai_request(args: List[str]) -> Tuple[List[str], bool]:
+    """Remove optional AI trigger words from an astronomy command."""
+    cleaned: List[str] = []
+    wants_ai = False
+
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in ASTRO_AI_TRIGGER_WORDS:
+            wants_ai = True
+            continue
+        cleaned.append(arg)
+
+    return cleaned, wants_ai
+
+
+async def send_astro_ai_explanation(
+    update: Update,
+    command_name: str,
+    user_input: str,
+    deterministic_context: str = "",
+) -> None:
+    if not update.message:
+        return
+
+    if call_ai is None:
+        await update.message.reply_text(
+            "AI explanation is not available because modules.ai_module could not be imported."
+        )
+        return
+
+    user_input = user_input.strip()
+    deterministic_context = deterministic_context.strip()
+
+    if deterministic_context and len(deterministic_context) > 2500:
+        deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
+
+    system_prompt = (
+        "You are AhBashin Bot's astronomy tutor. Explain astronomy results clearly, briefly, "
+        "and accurately for a student. The deterministic astronomy module already performed the "
+        "calculation or lookup, so do not override or contradict it. Explain moon phases, planets, "
+        "astronomical distances, gravity comparisons, and meteor showers in simple terms. Keep the answer concise."
+    )
+
+    prompt_parts = [
+        f"Astronomy command: /{command_name}",
+        f"User input: {user_input or '(no input)'}",
+    ]
+
+    if deterministic_context:
+        prompt_parts.append(f"Result/context from the astronomy module:\n{deterministic_context}")
+
+    prompt_parts.append(
+        "Explain what this astronomy result means, which concept is involved, and how the user should interpret it. "
+        "For moon plots or solar-system diagrams, explain the visual meaning."
+    )
+
+    try:
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+    except Exception as error:
+        await update.message.reply_text(f"AI astronomy explanation error.\n\nError: {error}")
+        return
+
+    text = "AI astronomy explanation 🧠🌙\n\n" + explanation
+    for chunk in split_long_text(text, limit=3500):
+        await update.message.reply_text(chunk)
+
+
+def astro_ai_wrapper(command_name: str, handler):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        original_args = list(getattr(context, "args", []) or [])
+        cleaned_args, wants_ai = split_astro_ai_request(original_args)
+        context.args = cleaned_args
+
+        try:
+            await handler(update, context)
+        finally:
+            context.args = original_args
+
+        if wants_ai:
+            await send_astro_ai_explanation(
+                update,
+                command_name=command_name,
+                user_input=" ".join(cleaned_args),
+            )
+
+    return wrapped
+
+
+async def astro_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explain an astronomy request/result using AI.
+
+    Usage:
+    /astro_ai explain moon phases
+    or reply to an astronomy result/plot caption with /astro_ai
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Astronomy AI usage:\n\n"
+            "Add ai/explain to an astronomy command:\n"
+            "/moon explain\n"
+            "/planet mars ai\n\n"
+            "Or reply to an astronomy result with:\n"
+            "/astro_ai"
+        )
+        return
+
+    await send_astro_ai_explanation(
+        update,
+        command_name="astro_ai",
+        user_input=text,
+        deterministic_context=text,
+    )
+
+
 PLANETS: Dict[str, Dict] = {
     "mercury": {
         "name": "Mercury",
@@ -221,6 +380,10 @@ def astronomy_help_text() -> str:
         "/gravity_compare 70 - compare weight for 70 kg mass\n\n"
         "Meteor showers:\n"
         "/meteor - upcoming meteor showers\n\n"
+        "AI explanation:\n"
+        "Add ai/explain to any astronomy command, example:\n"
+        "/moon explain\n"
+        "/astro_ai - explain a replied astronomy result\n\n"
         "Works offline and does not need an API key."
     )
 
@@ -778,10 +941,20 @@ async def meteor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def register_astronomy_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("astrohelp", astrohelp_command))
-    app.add_handler(CommandHandler("moon", moon_command))
-    app.add_handler(CommandHandler("moonplot", moonplot_command))
-    app.add_handler(CommandHandler("planet", planet_command))
-    app.add_handler(CommandHandler("solar_system", solar_system_command))
-    app.add_handler(CommandHandler("astro_distance", astro_distance_command))
-    app.add_handler(CommandHandler("gravity_compare", gravity_compare_command))
-    app.add_handler(CommandHandler("meteor", meteor_command))
+    app.add_handler(CommandHandler("astro_ai", astro_ai_command))
+    app.add_handler(CommandHandler("astroai", astro_ai_command))
+    app.add_handler(CommandHandler("astronomy_ai", astro_ai_command))
+    app.add_handler(CommandHandler("astrology_ai", astro_ai_command))
+
+    def add(names: List[str], handler, command_name: str) -> None:
+        wrapped = astro_ai_wrapper(command_name, handler)
+        for name in names:
+            app.add_handler(CommandHandler(name, wrapped))
+
+    add(["moon"], moon_command, "moon")
+    add(["moonplot"], moonplot_command, "moonplot")
+    add(["planet"], planet_command, "planet")
+    add(["solar_system"], solar_system_command, "solar_system")
+    add(["astro_distance"], astro_distance_command, "astro_distance")
+    add(["gravity_compare"], gravity_compare_command, "gravity_compare")
+    add(["meteor"], meteor_command, "meteor")
