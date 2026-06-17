@@ -29,13 +29,6 @@ except Exception as error:
     MODULE_STATUS["photo"] = f"disabled: {error}"
 
 try:
-    from modules.ai_photo_module import register_ai_photo_handlers
-    MODULE_STATUS["ai_photo"] = True
-except Exception as error:
-    register_ai_photo_handlers = None
-    MODULE_STATUS["ai_photo"] = f"disabled: {error}"
-
-try:
     from modules.news_module import register_news_handlers
     MODULE_STATUS["news"] = True
 except Exception as error:
@@ -220,11 +213,8 @@ async def setup_bot_commands() -> None:
         BotCommand("fiblist", "Fibonacci list"),
         BotCommand("fibspiral", "Fibonacci spiral"),
         BotCommand("stats", "Statistics"),
-        BotCommand("statsfile", "Statistics as file"),
         BotCommand("polyroots", "Find polynomial roots"),
-        BotCommand("roots", "Find polynomial roots"),
         BotCommand("polyplot", "Plot polynomial"),
-        BotCommand("plotpoly", "Plot polynomial"),
         BotCommand("primes", "Prime numbers less than n"),
         BotCommand("primesfile", "Prime numbers as file"),
         BotCommand("plot", "Plot function"),
@@ -288,9 +278,7 @@ async def setup_bot_commands() -> None:
         BotCommand("wc_group", "World Cup group table"),
         BotCommand("wc_standings", "World Cup standings"),
         BotCommand("trump", "Latest Trump news"),
-        BotCommand("trumpfile", "Trump news as file"),
         BotCommand("download", "Download X/Twitter media"),
-        BotCommand("audio", "Download audio"),
         BotCommand("downloader_help", "Downloader help"),
         BotCommand("add_birthday", "Add birthday"),
         BotCommand("birthdays", "Show birthdays"),
@@ -314,7 +302,7 @@ async def setup_bot_commands() -> None:
         BotCommand("activity_chart", "Group chart"),
         BotCommand("awards", "Weekly awards"),
         BotCommand("photohelp", "Photo help"),
-        BotCommand("ai_photohelp", "AI photo help"),
+
     ]
 
     await telegram_app.bot.set_my_commands(commands)
@@ -345,8 +333,6 @@ def register_handlers() -> None:
         register_game_handlers(telegram_app)
     if register_photo_handlers:
         register_photo_handlers(telegram_app)
-    if register_ai_photo_handlers:
-        register_ai_photo_handlers(telegram_app)
     if register_group_activity_handlers:
         register_group_activity_handlers(telegram_app)
 
