@@ -10,6 +10,7 @@ from modules.graph_math_module import register_graph_math_handlers
 from modules.data_science_module import register_data_science_handlers
 from modules.physics_module import register_physics_handlers
 from modules.astronomy_module import register_astronomy_handlers
+from modules.chemistry_module import register_chemistry_handlers
 
 from modules.photo_module import register_photo_handlers
 from modules.news_module import register_news_handlers
@@ -58,6 +59,7 @@ def main_help_text() -> str:
         "/dshelp - data science, statistics, regression, clustering, CSV\n"
         "/physicshelp - physics calculators and plots\n"
         "/astrohelp - astronomy, moon, planets, meteor showers\n"
+        "/chemhelp - chemistry, elements, molar mass, balance, pH, gas laws\n"
         "/photohelp - photo tools\n"
         "/birthday_help - birthday manager\n"
         "/dart_help - dart game\n"
@@ -71,6 +73,8 @@ def main_help_text() -> str:
         "/linear_regression 1,2; 2,4; 3,5; 4,8\n"
         "/projectile speed=20 angle=45\n"
         "/moonplot\n"
+        "/molar_mass Ca(OH)2\n"
+        "/balance C3H8 + O2 -> CO2 + H2O\n"
         "/dart\n"
     )
 
@@ -171,6 +175,7 @@ async def setup_bot_commands() -> None:
         BotCommand("dshelp", "Data science help"),
         BotCommand("physicshelp", "Physics help"),
         BotCommand("astrohelp", "Astronomy help"),
+        BotCommand("chemhelp", "Chemistry help"),
         BotCommand("photohelp", "Photo help"),
         BotCommand("birthday_help", "Birthday help"),
         BotCommand("dart_help", "Dart game help"),
@@ -200,6 +205,7 @@ def register_handlers() -> None:
     register_data_science_handlers(telegram_app)
     register_physics_handlers(telegram_app)
     register_astronomy_handlers(telegram_app)
+    register_chemistry_handlers(telegram_app)
 
     register_fifa_handlers(telegram_app)
     register_news_handlers(telegram_app)
@@ -258,6 +264,7 @@ async def root():
             "data_science": True,
             "physics": True,
             "astronomy": True,
+            "chemistry": True,
             "photos": True,
             "world_cup": True,
             "news": True,
