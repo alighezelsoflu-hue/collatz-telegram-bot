@@ -3,6 +3,7 @@ from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from modules.graph_math_module import register_graph_math_handlers
 from modules.data_science_module import register_data_science_handlers
+from modules.physics_module import register_physics_handlers
 
 from config import (
     TOKEN,
@@ -139,6 +140,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/confusion_matrix cat,cat; dog,cat; dog,dog - classification metrics"
         "/csv_analyze - analyze a CSV file"
         "/dshelp - data science help"
+        "Physics:\n"
+        "/physicshelp - physics command help\n"
+        "/kinematics u=0 a=9.8 t=5 - motion solver\n"
+        "/motionplot u=0 a=9.8 t=10 - motion graph\n"
+        "/projectile speed=20 angle=45 - projectile result\n"
+        "/projectileplot speed=20 angle=45 - projectile graph\n"
+        "/force m=10 a=3 - force calculator\n"
+        "/weight m=70 - weight calculator\n"
+        "/friction mu=0.4 normal=200 - friction force\n"
+        "/kinetic m=2 v=10 - kinetic energy\n"
+        "/potential m=5 h=20 - potential energy\n"
+        "/momentum m=4 v=12 - momentum\n"
+        "/wave f=440 wavelength=0.78 - wave calculator\n"
+        "/waveplot amplitude=2 frequency=3 duration=2 - wave graph\n"
+        "/ohm V=12 R=4 - Ohm's law\n"
+        "/series 10 20 30 - series resistance\n"
+        "/parallel 10 20 30 - parallel resistance\n"
+        "/spring k=200 x=0.1 - spring force\n"
+        "/shmplot amplitude=2 period=4 - SHM graph\n"
+        "/lens f=10 object=30 - thin lens\n"
+        "/gravity m1=5.97e24 m2=70 r=6.37e6 - gravity\n"
+        "/gravityplot m1=5.97e24 m2=70 rmin=6.37e6 rmax=5e7 - gravity plot\n"
+        "/convert 10 m/s to km/h - unit converter\n\n"
         "World Cup:\n"
         "/wc_today - World Cup matches today\n"
         "/wc_tomorrow - World Cup matches tomorrow\n"
@@ -236,6 +260,28 @@ async def setup_bot_commands() -> None:
         BotCommand("confusion_matrix", "Classification metrics"),
         BotCommand("csv_analyze", "Analyze CSV file"),
         BotCommand("dshelp", "Data science help"),
+        BotCommand("physicshelp", "Physics help"),
+        BotCommand("kinematics", "Kinematics solver"),
+        BotCommand("motionplot", "Motion plot"),
+        BotCommand("projectile", "Projectile motion"),
+        BotCommand("projectileplot", "Projectile trajectory plot"),
+        BotCommand("force", "Force calculator"),
+        BotCommand("weight", "Weight calculator"),
+        BotCommand("friction", "Friction calculator"),
+        BotCommand("kinetic", "Kinetic energy"),
+        BotCommand("potential", "Potential energy"),
+        BotCommand("momentum", "Momentum calculator"),
+        BotCommand("wave", "Wave calculator"),
+        BotCommand("waveplot", "Wave plot"),
+        BotCommand("ohm", "Ohm's law"),
+        BotCommand("series", "Series resistance"),
+        BotCommand("parallel", "Parallel resistance"),
+        BotCommand("spring", "Spring and Hooke's law"),
+        BotCommand("shmplot", "Simple harmonic motion plot"),
+        BotCommand("lens", "Thin lens calculator"),
+        BotCommand("gravity", "Gravity force"),
+        BotCommand("gravityplot", "Gravity force plot"),
+        BotCommand("convert", "Physics unit converter"),
         BotCommand("wc_today", "World Cup matches today"),
         BotCommand("wc_tomorrow", "World Cup matches tomorrow"),
         BotCommand("wc_live", "Live World Cup matches"),
@@ -285,6 +331,7 @@ def register_handlers() -> None:
     register_math_handlers(telegram_app)
     register_graph_math_handlers(telegram_app)
     register_data_science_handlers(telegram_app)
+    register_physics_handlers(telegram_app)
 
     if register_fifa_handlers:
         register_fifa_handlers(telegram_app)
