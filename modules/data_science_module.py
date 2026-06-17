@@ -31,6 +31,125 @@ except Exception:
 
 
 # ------------------------------------------------------------
+# AI integration
+# ------------------------------------------------------------
+
+AI_REQUEST_WORDS = {"ai", "explain", "interpret", "summary", "summarize", "insight", "insights"}
+AI_SUMMARY_MAX_CHARS = 5200
+
+
+def extract_ai_request(text: str) -> Tuple[bool, str]:
+    """Return (ai_requested, cleaned_text).
+
+    Users can add words like `ai`, `explain`, or `interpret` to a data-science command.
+    The cleaned text is sent to the deterministic parser so the AI flag does not break
+    column names, numeric parsing, or command options.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False, ""
+
+    requested = False
+    cleaned_tokens = []
+    for token in raw.split():
+        bare = token.strip().lower().strip(",.;:!?()[]{}")
+        if bare in AI_REQUEST_WORDS:
+            requested = True
+            continue
+        cleaned_tokens.append(token)
+
+    return requested, " ".join(cleaned_tokens).strip()
+
+
+def ai_help_suffix() -> str:
+    return (
+        "\n\nAI summary: add `ai` or `explain` to most data-science commands, for example:\n"
+        "/data_summary 4,7,9,10,10,12 ai\n"
+        "/poly_regression degree 2 | 1,2; 2,5; 3,10 explain\n"
+        "Reply to a CSV with /dataset_profile ai\n"
+        "You can also reply to any result with /ds_ai."
+    )
+
+
+async def send_data_science_ai_summary(
+    update: Update,
+    title: str,
+    result_text: str,
+    original_input: str = "",
+    extra_context: str = "",
+) -> None:
+    """Send an AI interpretation of a deterministic data-science result.
+
+    This does not replace the module's calculations. It asks the AI module to explain
+    the already-computed result, mention limitations, and suggest next steps.
+    """
+    if not update.message:
+        return
+
+    try:
+        from modules.ai_module import call_ai
+    except Exception:
+        await update.message.reply_text(
+            "AI summary is not available because modules/ai_module.py could not be imported.\n"
+            "Make sure ai_module.py exists and is registered in main.py."
+        )
+        return
+
+    safe_result = (result_text or "").strip()
+    if len(safe_result) > AI_SUMMARY_MAX_CHARS:
+        safe_result = safe_result[:AI_SUMMARY_MAX_CHARS] + "\n\n[Result was truncated before AI summary.]"
+
+    prompt_parts = [
+        f"Data-science task: {title}",
+    ]
+    if original_input.strip():
+        prompt_parts.append("User input or command arguments:\n" + original_input.strip()[:1500])
+    if extra_context.strip():
+        prompt_parts.append("Extra context:\n" + extra_context.strip()[:1500])
+    prompt_parts.append("Deterministic bot result:\n" + safe_result)
+    prompt_parts.append(
+        "Explain the result for a non-expert. Include: 1) key insight, "
+        "2) what the numbers mean, 3) limitations/cautions, and 4) one sensible next step. "
+        "Do not recompute or contradict the deterministic result."
+    )
+
+    system_prompt = (
+        "You are AhBashin Bot's data-science tutor. Interpret statistical and ML results clearly, "
+        "briefly, and accurately. Do not invent hidden data. Do not replace deterministic calculations. "
+        "Mention uncertainty and limitations when relevant."
+    )
+
+    try:
+        await update.message.chat.send_action(action="typing")
+        answer = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+    except Exception as error:
+        await update.message.reply_text(f"AI data-science summary error.\n\n{error}")
+        return
+
+    output = "AI data-science summary 🤖📊\n\n" + answer
+    if len(output) <= 3500:
+        await update.message.reply_text(output)
+    elif len(output) <= 10000:
+        for chunk in split_long_text(output, limit=3500):
+            await update.message.reply_text(chunk)
+    else:
+        await update.message.reply_document(document=text_to_file(output, "data_science_ai_summary.txt"), caption="AI data-science summary")
+
+
+async def maybe_send_data_science_ai_summary(
+    update: Update,
+    ai_requested: bool,
+    title: str,
+    result_text: str,
+    original_input: str = "",
+    extra_context: str = "",
+) -> None:
+    if ai_requested:
+        await send_data_science_ai_summary(update, title, result_text, original_input, extra_context)
+
+
+
+# ------------------------------------------------------------
 # Limits for Render Free safety
 # ------------------------------------------------------------
 
@@ -101,6 +220,12 @@ def ds_help_text() -> str:
         "/corr_matrix - CSV correlation heatmap\n"
         "/pairplot col1 col2 col3 - CSV scatter matrix, max 4 columns\n\n"
         "CSV usage: reply to a CSV file with the command, or upload a CSV with the command as caption.\n\n"
+        "AI summaries:\n"
+        "Add ai or explain to most commands for an AI interpretation after the deterministic result.\n"
+        "/data_summary 4,7,9,10,10,12 ai\n"
+        "/forecast steps 5 | 10,12,13,15,18 explain\n"
+        "Reply to a CSV with /dataset_profile ai\n"
+        "/ds_ai - summarize a replied-to data-science result\n\n"
         "Limits:\n"
         f"numbers: {MAX_NUMBERS}, points: {MAX_POINTS}, CSV: 1 MB / {MAX_CSV_ROWS} rows / {MAX_CSV_COLUMNS} columns"
     )
@@ -374,8 +499,11 @@ async def data_summary_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        values = parse_numbers_from_text(" ".join(context.args))
+        values = parse_numbers_from_text(clean_text)
         report = build_summary_report(values)
     except Exception as error:
         await update.message.reply_text(
@@ -387,6 +515,7 @@ async def data_summary_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await update.message.reply_text(report)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Data summary", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -473,8 +602,11 @@ async def histogram_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        values, bins = parse_histogram_input(" ".join(context.args))
+        values, bins = parse_histogram_input(clean_text)
         image = create_histogram_image(values, bins)
     except Exception as error:
         await update.message.reply_text(
@@ -486,7 +618,14 @@ async def histogram_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    await update.message.reply_photo(photo=InputFile(image, filename="histogram.png"), caption="Histogram 📊")
+    caption = "Histogram 📊"
+    await update.message.reply_photo(photo=InputFile(image, filename="histogram.png"), caption=caption)
+    histogram_report = (
+        f"Histogram\nCount: {len(values)}\nBins: {bins}\n"
+        f"Minimum: {nice_number(min(values))}\nMaximum: {nice_number(max(values))}\n"
+        f"Mean: {nice_number(mean(values))}"
+    )
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Histogram", histogram_report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -573,8 +712,11 @@ async def boxplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        values = parse_numbers_from_text(" ".join(context.args))
+        values = parse_numbers_from_text(clean_text)
         image, stats = create_boxplot_image(values)
     except Exception as error:
         await update.message.reply_text(
@@ -591,6 +733,16 @@ async def boxplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"outliers={len(stats['outliers'])}"
     )
     await update.message.reply_photo(photo=InputFile(image, filename="boxplot.png"), caption=caption)
+    boxplot_report = (
+        "Box plot\n"
+        f"Count: {len(values)}\n"
+        f"Q1: {nice_number(stats['q1'])}\n"
+        f"Median: {nice_number(stats['median'])}\n"
+        f"Q3: {nice_number(stats['q3'])}\n"
+        f"IQR: {nice_number(stats['iqr'])}\n"
+        f"Outliers: {', '.join(nice_number(v) for v in stats['outliers']) if stats['outliers'] else 'None'}"
+    )
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Box plot", boxplot_report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -703,8 +855,11 @@ async def correlation_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        points = parse_points(" ".join(context.args), max_points=MAX_POINTS)
+        points = parse_points(clean_text, max_points=MAX_POINTS)
         if len(points) < 2:
             raise ValueError("At least 2 points are required.")
         r = pearson_correlation(points)
@@ -718,18 +873,21 @@ async def correlation_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    await update.message.reply_text(
-        f"Pearson correlation 📈\n\nr = {nice_number(r)}\n{correlation_strength(r)}"
-    )
+    report = f"Pearson correlation 📈\n\nr = {nice_number(r)}\n{correlation_strength(r)}"
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="correlation.png"), caption="Correlation scatter plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Pearson correlation", report, clean_text)
 
 
 async def linear_regression_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        points = parse_points(" ".join(context.args), max_points=MAX_POINTS)
+        points = parse_points(clean_text, max_points=MAX_POINTS)
         if len(points) < 2:
             raise ValueError("At least 2 points are required.")
         regression = linear_regression(points)
@@ -753,6 +911,7 @@ async def linear_regression_command(update: Update, context: ContextTypes.DEFAUL
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="linear_regression.png"), caption="Linear regression plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Linear regression", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -870,8 +1029,11 @@ async def kmeans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        k, points = parse_kmeans_input(" ".join(context.args))
+        k, points = parse_kmeans_input(clean_text)
         result = run_kmeans(points, k)
         image = create_kmeans_image(points, result)
     except Exception as error:
@@ -889,8 +1051,10 @@ async def kmeans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         lines.append(f"Cluster {idx}: center=({nice_number(centroid[0])}, {nice_number(centroid[1])}), points={size}")
     lines.append(f"Inertia: {nice_number(result['inertia'])}")
 
-    await update.message.reply_text("\n".join(lines))
+    report = "\n".join(lines)
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="kmeans.png"), caption="K-means clustering plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means clustering", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -925,8 +1089,11 @@ async def outliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        method, data_text = split_method_and_data(" ".join(context.args), "iqr")
+        method, data_text = split_method_and_data(clean_text, "iqr")
         values = parse_numbers_from_text(data_text)
 
         if method == "iqr":
@@ -959,11 +1126,13 @@ async def outliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     outlier_text = ", ".join(nice_number(value) for value in result["outliers"]) if result["outliers"] else "None"
-    await update.message.reply_text(
+    report = (
         f"Outlier detection — {result['method']}\n\n"
         f"Outliers: {outlier_text}\n\n"
         f"{detail}"
     )
+    await update.message.reply_text(report)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Outlier detection", report, clean_text)
 
 
 def normalize_values(values: List[float], method: str) -> List[float]:
@@ -987,8 +1156,11 @@ async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        method, data_text = split_method_and_data(" ".join(context.args), "minmax")
+        method, data_text = split_method_and_data(clean_text, "minmax")
         values = parse_numbers_from_text(data_text)
         normalized = normalize_values(values, method)
     except Exception as error:
@@ -1008,6 +1180,7 @@ async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "normalized_values.txt"), caption="Normalized values")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Normalization", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -1125,8 +1298,11 @@ async def confusion_matrix_command(update: Update, context: ContextTypes.DEFAULT
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        pairs = parse_label_pairs(" ".join(context.args))
+        pairs = parse_label_pairs(clean_text)
         metrics = confusion_metrics(pairs)
         image = create_confusion_matrix_image(metrics)
     except Exception as error:
@@ -1155,8 +1331,10 @@ async def confusion_matrix_command(update: Update, context: ContextTypes.DEFAULT
             f"- {label}: precision={nice_number(item['precision'])}, recall={nice_number(item['recall'])}, F1={nice_number(item['f1'])}, support={item['support']}"
         )
 
-    await update.message.reply_text("\n".join(lines))
+    report = "\n".join(lines)
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="confusion_matrix.png"), caption="Confusion matrix")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Confusion matrix and classification metrics", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -1289,7 +1467,7 @@ def analyze_csv_text(text: str) -> str:
     return "\n".join(lines)
 
 
-async def analyze_document_csv(update: Update, document) -> None:
+async def analyze_document_csv(update: Update, document, ai_requested: bool = False, original_input: str = "") -> None:
     if not update.message:
         return
 
@@ -1318,20 +1496,23 @@ async def analyze_document_csv(update: Update, document) -> None:
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "csv_analysis.txt"), caption="CSV analysis")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV analysis", report, original_input)
 
 
 async def csv_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
     reply = update.message.reply_to_message
 
     if reply and reply.document:
-        await analyze_document_csv(update, reply.document)
+        await analyze_document_csv(update, reply.document, ai_requested=ai_requested, original_input=clean_text)
         return
 
     if update.message.document:
-        await analyze_document_csv(update, update.message.document)
+        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_text)
         return
 
     await update.message.reply_text(
@@ -1362,7 +1543,8 @@ async def csv_document_message_handler(update: Update, context: ContextTypes.DEF
         pass
 
     if command == "/csv_analyze":
-        await analyze_document_csv(update, update.message.document)
+        ai_requested, clean_args_text = extract_ai_request(args_text)
+        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_args_text)
     elif command in {"/corr_matrix", "/corrmatrix"}:
         await corr_matrix_command(update, context)
     elif command == "/pairplot":
@@ -1664,10 +1846,13 @@ async def corr_matrix_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
         csv_text = await download_csv_text(update)
         headers, rows = load_csv_table(csv_text)
-        selected = [part.strip() for part in re.split(r"[,\s]+", " ".join(context.args).strip()) if part.strip()]
+        selected = [part.strip() for part in re.split(r"[,\s]+", clean_text.strip()) if part.strip()]
         columns, matrix = build_correlation_matrix(headers, rows, selected if selected else None)
         image = create_correlation_matrix_image(columns, matrix)
     except Exception as error:
@@ -1681,6 +1866,11 @@ async def corr_matrix_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     await update.message.reply_photo(photo=InputFile(image, filename="correlation_matrix.png"), caption="CSV correlation matrix")
+    matrix_lines = ["CSV correlation matrix", "Columns: " + ", ".join(columns)]
+    for col, row in zip(columns, matrix):
+        values = ", ".join("NA" if v is None else nice_number(v, 3) for v in row)
+        matrix_lines.append(f"{col}: {values}")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV correlation matrix", "\n".join(matrix_lines), clean_text)
 
 
 # ------------------------------------------------------------
@@ -1745,11 +1935,14 @@ async def pairplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
         csv_text = await download_csv_text(update)
         headers, rows = load_csv_table(csv_text)
         numeric = numeric_columns(headers, rows)
-        requested = [part.strip() for part in re.split(r"[,\s]+", " ".join(context.args).strip()) if part.strip()]
+        requested = [part.strip() for part in re.split(r"[,\s]+", clean_text.strip()) if part.strip()]
 
         if requested:
             columns = [resolve_column_name(headers, col) for col in requested]
@@ -1776,6 +1969,13 @@ async def pairplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     await update.message.reply_photo(photo=InputFile(image, filename="pairplot.png"), caption="CSV pairplot")
+    pairplot_report = (
+        "CSV pairplot scatter matrix\n"
+        f"Columns: {', '.join(columns)}\n"
+        f"Rows available: {len(rows)}\n"
+        "Use the plots to inspect linear/nonlinear relationships, clusters, and outliers."
+    )
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV pairplot", pairplot_report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -1898,8 +2098,11 @@ async def poly_regression_command(update: Update, context: ContextTypes.DEFAULT_
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        degree, data_text = parse_degree_points_input(" ".join(context.args))
+        degree, data_text = parse_degree_points_input(clean_text)
         points = parse_points(data_text, max_points=MAX_REGRESSION_POINTS)
         result = fit_polynomial_regression(points, degree)
         image = create_polynomial_regression_image(points, result)
@@ -1921,6 +2124,7 @@ async def poly_regression_command(update: Update, context: ContextTypes.DEFAULT_
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="polynomial_regression.png"), caption="Polynomial regression plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Polynomial regression", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2003,8 +2207,11 @@ async def multiple_regression_command(update: Update, context: ContextTypes.DEFA
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        args_text = " ".join(context.args)
+        args_text = clean_text
         csv_text = await download_csv_text(update)
         headers, rows = load_csv_table(csv_text)
         target_raw, features_raw = parse_multiple_regression_args(args_text)
@@ -2038,8 +2245,10 @@ async def multiple_regression_command(update: Update, context: ContextTypes.DEFA
     for feature, coeff in zip(features, result["coeffs"][1:]):
         lines.append(f"{feature}: {nice_number(coeff)}")
 
-    await update.message.reply_text("\n".join(lines))
+    report = "\n".join(lines)
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="multiple_regression.png"), caption="Predicted vs actual")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Multiple linear regression", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2132,8 +2341,11 @@ async def logistic_regression_command(update: Update, context: ContextTypes.DEFA
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        points = parse_points(" ".join(context.args), max_points=MAX_REGRESSION_POINTS)
+        points = parse_points(clean_text, max_points=MAX_REGRESSION_POINTS)
         result = fit_logistic_regression(points)
         image = create_logistic_regression_image(points, result)
     except Exception as error:
@@ -2153,6 +2365,7 @@ async def logistic_regression_command(update: Update, context: ContextTypes.DEFA
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="logistic_regression.png"), caption="Logistic regression plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Logistic regression", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2229,8 +2442,11 @@ async def pca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        points = parse_points(" ".join(context.args), max_points=MAX_REGRESSION_POINTS)
+        points = parse_points(clean_text, max_points=MAX_REGRESSION_POINTS)
         result = run_pca_2d(points)
         image = create_pca_image(points, result)
     except Exception as error:
@@ -2242,14 +2458,16 @@ async def pca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await update.message.reply_text(
+    report = (
         "Principal component analysis 🧭\n\n"
         f"Mean point: ({nice_number(result['mean'][0])}, {nice_number(result['mean'][1])})\n"
         f"PC1 direction: ({nice_number(result['pc1'][0])}, {nice_number(result['pc1'][1])})\n"
         f"Eigenvalues: {nice_number(result['eigenvalues'][0])}, {nice_number(result['eigenvalues'][1])}\n"
         f"Explained variance by PC1: {nice_number(result['explained'])}"
     )
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="pca.png"), caption="PCA plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "PCA", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2319,8 +2537,11 @@ async def kmeans_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        max_k, points = parse_kmeans_auto_input(" ".join(context.args))
+        max_k, points = parse_kmeans_auto_input(clean_text)
         inertias = []
         for k in range(1, max_k + 1):
             result = run_kmeans(points, k)
@@ -2340,8 +2561,10 @@ async def kmeans_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     for k, inertia in inertias:
         lines.append(f"k={k}: {nice_number(inertia)}")
 
-    await update.message.reply_text("\n".join(lines))
+    report = "\n".join(lines)
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="kmeans_elbow.png"), caption="K-means elbow curve")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means elbow analysis", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2409,8 +2632,11 @@ async def moving_average_command(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        window, values = parse_window_values_input(" ".join(context.args))
+        window, values = parse_window_values_input(clean_text)
         ma_values = moving_average(values, window)
         image = create_line_series_image([("Original", values), (f"MA window={window}", ma_values)], "Moving average", "moving_average.png")
     except Exception as error:
@@ -2425,8 +2651,10 @@ async def moving_average_command(update: Update, context: ContextTypes.DEFAULT_T
     preview = ", ".join(nice_number(v) for v in ma_values[:20])
     if len(ma_values) > 20:
         preview += ", ..."
-    await update.message.reply_text(f"Moving average 📉\n\nWindow: {window}\nValues: {preview}")
+    report = f"Moving average 📉\n\nWindow: {window}\nValues: {preview}"
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="moving_average.png"), caption="Moving average plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Moving average", report, clean_text)
 
 
 def parse_forecast_input(text: str) -> Tuple[int, List[float]]:
@@ -2458,8 +2686,11 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        steps, values = parse_forecast_input(" ".join(context.args))
+        steps, values = parse_forecast_input(clean_text)
         points = [(i + 1, value) for i, value in enumerate(values)]
         reg = linear_regression(points)
         forecast_values = [reg["slope"] * (len(values) + i + 1) + reg["intercept"] for i in range(steps)]
@@ -2474,13 +2705,15 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await update.message.reply_text(
+    report = (
         "Simple trend forecast 🔮\n\n"
         f"Model: y = {nice_number(reg['slope'])}t + {nice_number(reg['intercept'])}\n"
         f"R² on history: {nice_number(reg['r2'])}\n"
         f"Next {steps}: " + ", ".join(nice_number(v) for v in forecast_values)
     )
+    await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="forecast.png"), caption="Forecast plot")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Simple trend forecast", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2575,8 +2808,11 @@ async def ttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        parsed = parse_ttest_input(" ".join(context.args))
+        parsed = parse_ttest_input(clean_text)
         if parsed["kind"] == "one_sample":
             result = one_sample_ttest(parsed["values"], parsed["mean"])
             report = (
@@ -2610,6 +2846,7 @@ async def ttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await update.message.reply_text(report)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "t-test", report, clean_text)
 
 
 def chi_square_survival_approx(chi2: float, df: int) -> float:
@@ -2655,8 +2892,11 @@ async def chisquare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
-        observed, expected = parse_chisquare_input(" ".join(context.args))
+        observed, expected = parse_chisquare_input(clean_text)
         chi2 = sum((o - e) ** 2 / e for o, e in zip(observed, expected))
         df = len(observed) - 1
         p = chi_square_survival_approx(chi2, df)
@@ -2674,13 +2914,15 @@ async def chisquare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Category {i + 1}: observed={nice_number(o)}, expected={nice_number(e)}"
         for i, (o, e) in enumerate(zip(observed, expected))
     )
-    await update.message.reply_text(
+    report = (
         "Chi-square goodness-of-fit test 🧪\n\n"
         f"χ²: {nice_number(chi2)}\n"
         f"df: {df}\n"
         f"Approx. p-value: {nice_number(p)}\n\n"
         f"{rows_text}"
     )
+    await update.message.reply_text(report)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Chi-square goodness-of-fit test", report, clean_text)
 
 
 # ------------------------------------------------------------
@@ -2780,6 +3022,9 @@ async def dataset_profile_command(update: Update, context: ContextTypes.DEFAULT_
     if not update.message:
         return
 
+    raw_text = " ".join(context.args)
+    ai_requested, clean_text = extract_ai_request(raw_text)
+
     try:
         csv_text = await download_csv_text(update)
         headers, rows = load_csv_table(csv_text)
@@ -2796,10 +3041,39 @@ async def dataset_profile_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "dataset_profile.txt"), caption="Advanced dataset profile")
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Advanced dataset profile", report, clean_text)
 
 # ------------------------------------------------------------
 # Help and registration
 # ------------------------------------------------------------
+
+async def ds_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n"
+            "Reply to a data-science result with /ds_ai\n"
+            "or use /ds_ai paste a data-science result here"
+        )
+        return
+
+    await send_data_science_ai_summary(
+        update,
+        title="User-provided data-science result",
+        result_text=text,
+        original_input="/ds_ai",
+    )
+
 
 async def dshelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
@@ -2851,6 +3125,8 @@ def register_data_science_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("dataset_profile", dataset_profile_command))
     app.add_handler(CommandHandler("profile_csv", dataset_profile_command))
 
+    app.add_handler(CommandHandler("ds_ai", ds_ai_command))
+    app.add_handler(CommandHandler("dsai", ds_ai_command))
     app.add_handler(CommandHandler("dshelp", dshelp_command))
 
     # Only reacts when the document caption starts with a supported CSV command.
