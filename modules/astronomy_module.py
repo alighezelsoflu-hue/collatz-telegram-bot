@@ -29,7 +29,47 @@ MAX_DISTANCE_VALUE = 1e30
 # Optional AI explanation integration
 # ------------------------------------------------------------
 
-ASTRO_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
+ASTRO_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor", "teach", "lesson"}
+
+
+TUTOR_LANGUAGES = {
+    "en": "English",
+    "english": "English",
+    "fa": "Persian/Farsi",
+    "farsi": "Persian/Farsi",
+    "persian": "Persian/Farsi",
+    "de": "German",
+    "german": "German",
+    "it": "Italian",
+    "italian": "Italian",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+}
+
+
+def normalize_tutor_token(token: str) -> str:
+    return token.strip().lower().strip(".,!?:;()[]{}")
+
+
+def language_from_token(token: str):
+    return TUTOR_LANGUAGES.get(normalize_tutor_token(token))
+
+
+def extract_tutor_language(text: str) -> tuple[str, str]:
+    """Return (text_without_initial_language_code, language_name)."""
+    parts = text.strip().split()
+    if not parts:
+        return "", "English"
+
+    language = language_from_token(parts[0])
+    if language:
+        return " ".join(parts[1:]).strip(), language
+
+    return text.strip(), "English"
 
 try:
     from modules.ai_module import call_ai, AIProviderError
@@ -58,19 +98,31 @@ def split_long_text(text: str, limit: int = 3500) -> List[str]:
     return chunks
 
 
-def split_astro_ai_request(args: List[str]) -> Tuple[List[str], bool]:
-    """Remove optional AI trigger words from an astronomy command."""
+def split_astro_ai_request(args: List[str]) -> Tuple[List[str], bool, str]:
+    """Remove optional AI/tutor trigger words and optional tutor language."""
     cleaned: List[str] = []
     wants_ai = False
+    language = "English"
+    skip_next = False
 
-    for arg in args:
-        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
-        if normalized in ASTRO_AI_TRIGGER_WORDS:
-            wants_ai = True
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
             continue
+
+        normalized = normalize_tutor_token(arg)
+        if normalized in ASTRO_AI_TRIGGER_WORDS or normalized in {"teach", "lesson"}:
+            wants_ai = True
+            if normalized in {"tutor", "teach", "lesson"} and index + 1 < len(args):
+                selected_language = language_from_token(args[index + 1])
+                if selected_language:
+                    language = selected_language
+                    skip_next = True
+            continue
+
         cleaned.append(arg)
 
-    return cleaned, wants_ai
+    return cleaned, wants_ai, language
 
 
 async def send_astro_ai_explanation(
@@ -78,6 +130,8 @@ async def send_astro_ai_explanation(
     command_name: str,
     user_input: str,
     deterministic_context: str = "",
+    mode: str = "explain",
+    language: str = "English",
 ) -> None:
     if not update.message:
         return
@@ -94,12 +148,40 @@ async def send_astro_ai_explanation(
     if deterministic_context and len(deterministic_context) > 2500:
         deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
 
-    system_prompt = (
-        "You are AhBashin Bot's astronomy tutor. Explain astronomy results clearly, briefly, "
-        "and accurately for a student. The deterministic astronomy module already performed the "
-        "calculation or lookup, so do not override or contradict it. Explain moon phases, planets, "
-        "astronomical distances, gravity comparisons, and meteor showers in simple terms. Keep the answer concise."
-    )
+    is_tutor = mode.lower() == "tutor"
+
+    if is_tutor:
+        system_prompt = (
+            "You are AhBashin Bot's dedicated Astronomy AI Tutor. Teach astronomy like a patient, "
+            "expert human tutor. Build intuition first, then connect the idea to the relevant astronomy facts, "
+            "geometry, units, dates, or physical laws. Explain moon phases, illumination, orbital periods, "
+            "planet properties, astronomical distances, gravity, meteor showers, and solar-system diagrams. "
+            "Use simple analogies when useful, but stay scientifically accurate. If a deterministic result from "
+            "the astronomy module is provided, do not override it; explain it. Clearly separate observation facts "
+            "from interpretation. Avoid astrology or horoscope claims unless the user explicitly asks for a cultural/entertainment comparison. "
+            "Keep answers friendly, structured, and student-focused."
+        )
+        final_instruction = (
+            "Tutor the user on this astronomy topic/result. Structure the answer as:\n"
+            "1) Big idea\n2) What the result means\n3) Why it happens\n4) How to visualize it\n5) Quick practice question or sky-watching tip."
+        )
+        title = "AI astronomy tutor 🧑‍🏫🌌\n\n"
+        temperature = 0.35
+    else:
+        system_prompt = (
+            "You are AhBashin Bot's astronomy tutor. Explain astronomy results clearly, briefly, "
+            "and accurately for a student. The deterministic astronomy module already performed the "
+            "calculation or lookup, so do not override or contradict it. Explain moon phases, planets, "
+            "astronomical distances, gravity comparisons, and meteor showers in simple terms. Keep the answer concise."
+        )
+        final_instruction = (
+            "Explain what this astronomy result means, which concept is involved, and how the user should interpret it. "
+            "For moon plots or solar-system diagrams, explain the visual meaning."
+        )
+        title = "AI astronomy explanation 🧠🌙\n\n"
+        temperature = 0.25
+
+    system_prompt += f"\n\nRespond in {language}."
 
     prompt_parts = [
         f"Astronomy command: /{command_name}",
@@ -109,26 +191,33 @@ async def send_astro_ai_explanation(
     if deterministic_context:
         prompt_parts.append(f"Result/context from the astronomy module:\n{deterministic_context}")
 
-    prompt_parts.append(
-        "Explain what this astronomy result means, which concept is involved, and how the user should interpret it. "
-        "For moon plots or solar-system diagrams, explain the visual meaning."
-    )
+    prompt_parts.append(final_instruction)
 
     try:
-        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
     except Exception as error:
-        await update.message.reply_text(f"AI astronomy explanation error.\n\nError: {error}")
+        label = "tutor" if is_tutor else "explanation"
+        await update.message.reply_text(f"AI astronomy {label} error.\n\nError: {error}")
         return
 
-    text = "AI astronomy explanation 🧠🌙\n\n" + explanation
+    text = title + explanation
     for chunk in split_long_text(text, limit=3500):
         await update.message.reply_text(chunk)
+
+
+def detect_astro_ai_mode(args: List[str]) -> str:
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in {"tutor", "teach", "lesson"}:
+            return "tutor"
+    return "explain"
 
 
 def astro_ai_wrapper(command_name: str, handler):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         original_args = list(getattr(context, "args", []) or [])
-        cleaned_args, wants_ai = split_astro_ai_request(original_args)
+        cleaned_args, wants_ai, ai_language = split_astro_ai_request(original_args)
+        ai_mode = detect_astro_ai_mode(original_args)
         context.args = cleaned_args
 
         try:
@@ -141,6 +230,8 @@ def astro_ai_wrapper(command_name: str, handler):
                 update,
                 command_name=command_name,
                 user_input=" ".join(cleaned_args),
+                mode=ai_mode,
+                language=ai_language,
             )
 
     return wrapped
@@ -181,6 +272,49 @@ async def astro_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         command_name="astro_ai",
         user_input=text,
         deterministic_context=text,
+    )
+
+
+async def astro_tutor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dedicated astronomy tutor mode.
+
+    Usage:
+    /astro_tutor explain moon phases
+    /astro_tutor teach me why Mars looks red
+    or reply to an astronomy result/problem with /astro_tutor
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    text, tutor_language = extract_tutor_language(text)
+
+    if not text:
+        await update.message.reply_text(
+            "Astronomy tutor usage:\n\nDefault language is English. Add fa, de, it, fr, es, or ar after the tutor command.\n\nLanguage examples:\n/astro_tutor fa explain moon phases\n/astro_tutor de teach me why Mars looks red\n/astro_tutor it explain astronomical units\n\n"
+            "/astro_tutor explain moon phases\n"
+            "/astro_tutor teach me why Mars looks red\n"
+            "/astro_tutor why do meteor showers happen?\n"
+            "/astro_tutor explain astronomical units\n\n"
+            "Or reply to an astronomy result/problem with /astro_tutor"
+        )
+        return
+
+    await send_astro_ai_explanation(
+        update,
+        command_name="astro_tutor",
+        user_input=text,
+        deterministic_context=text,
+        mode="tutor",
+        language=tutor_language,
     )
 
 
@@ -945,6 +1079,12 @@ def register_astronomy_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("astroai", astro_ai_command))
     app.add_handler(CommandHandler("astronomy_ai", astro_ai_command))
     app.add_handler(CommandHandler("astrology_ai", astro_ai_command))
+    app.add_handler(CommandHandler("astro_tutor", astro_tutor_command))
+    app.add_handler(CommandHandler("astrotutor", astro_tutor_command))
+    app.add_handler(CommandHandler("astronomy_tutor", astro_tutor_command))
+    app.add_handler(CommandHandler("tutor_astro", astro_tutor_command))
+    app.add_handler(CommandHandler("tutor_astronomy", astro_tutor_command))
+    app.add_handler(CommandHandler("astrology_tutor", astro_tutor_command))
 
     def add(names: List[str], handler, command_name: str) -> None:
         wrapped = astro_ai_wrapper(command_name, handler)

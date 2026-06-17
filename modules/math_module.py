@@ -251,6 +251,46 @@ def evaluate_function(expr: str, variable_name: str, variable_value: float) -> f
 
 MATH_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
 
+
+TUTOR_LANGUAGES = {
+    "en": "English",
+    "english": "English",
+    "fa": "Persian/Farsi",
+    "farsi": "Persian/Farsi",
+    "persian": "Persian/Farsi",
+    "de": "German",
+    "german": "German",
+    "it": "Italian",
+    "italian": "Italian",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+}
+
+
+def normalize_tutor_token(token: str) -> str:
+    return token.strip().lower().strip(".,!?:;()[]{}")
+
+
+def language_from_token(token: str):
+    return TUTOR_LANGUAGES.get(normalize_tutor_token(token))
+
+
+def extract_tutor_language(text: str) -> tuple[str, str]:
+    """Return (text_without_initial_language_code, language_name)."""
+    parts = text.strip().split()
+    if not parts:
+        return "", "English"
+
+    language = language_from_token(parts[0])
+    if language:
+        return " ".join(parts[1:]).strip(), language
+
+    return text.strip(), "English"
+
 try:
     from modules.ai_module import call_ai, AIProviderError
 except Exception:
@@ -260,24 +300,31 @@ except Exception:
         pass
 
 
-def split_math_ai_request(args: Sequence[str]) -> Tuple[List[str], bool]:
-    """Remove optional AI trigger words from a math command.
-
-    Examples:
-    /stats 4,7,9 explain -> args become ["4,7,9"], wants_ai=True
-    /plot sin(x) range -6 6 ai -> args become ["sin(x)", "range", "-6", "6"]
-    """
+def split_math_ai_request(args: Sequence[str]) -> Tuple[List[str], bool, str]:
+    """Remove optional AI/tutor trigger words and optional tutor language."""
     cleaned: List[str] = []
     wants_ai = False
+    language = "English"
+    skip_next = False
 
-    for arg in args:
-        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
-        if normalized in MATH_AI_TRIGGER_WORDS:
-            wants_ai = True
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
             continue
+
+        normalized = normalize_tutor_token(arg)
+        if normalized in MATH_AI_TRIGGER_WORDS or normalized in {"teach", "lesson"}:
+            wants_ai = True
+            if normalized in {"tutor", "teach", "lesson"} and index + 1 < len(args):
+                selected_language = language_from_token(args[index + 1])
+                if selected_language:
+                    language = selected_language
+                    skip_next = True
+            continue
+
         cleaned.append(arg)
 
-    return cleaned, wants_ai
+    return cleaned, wants_ai, language
 
 
 async def send_math_ai_explanation(
@@ -285,6 +332,8 @@ async def send_math_ai_explanation(
     command_name: str,
     user_input: str,
     deterministic_context: str = "",
+    mode: str = "explain",
+    language: str = "English",
 ) -> None:
     if not update.message:
         return
@@ -301,12 +350,39 @@ async def send_math_ai_explanation(
     if deterministic_context and len(deterministic_context) > 2500:
         deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
 
-    system_prompt = (
-        "You are AhBashin Bot's math tutor. Explain math and statistics results clearly, briefly, "
-        "and accurately for a student. The bot's deterministic math module already performed the "
-        "calculation, so do not override or contradict it. If you notice possible limitations, mention "
-        "them gently. Use step-by-step explanations when useful, but keep the answer concise."
-    )
+    is_tutor = mode.lower() == "tutor"
+
+    if is_tutor:
+        system_prompt = (
+            "You are AhBashin Bot's dedicated Math AI Tutor. Teach mathematics like a patient, "
+            "expert human tutor. Your job is not only to give an answer, but to build understanding. "
+            "Use clear step-by-step reasoning, define symbols, explain why each step is valid, and show "
+            "common mistakes. When the user gives a problem, solve it carefully. When the user gives a topic, "
+            "teach it with one small example and one practice question. Keep the tone friendly and student-focused. "
+            "Use simple formatting. Avoid unnecessary advanced jargon unless you explain it. Do not contradict "
+            "the deterministic math module; if a module result is provided, treat it as the source of truth."
+        )
+        final_instruction = (
+            "Tutor the user on this math topic/problem. Structure the answer as:\n"
+            "1) Big idea\n2) Step-by-step solution or explanation\n3) Common mistake\n4) Quick practice question."
+        )
+        title = "AI math tutor 🧑‍🏫🧮\n\n"
+        temperature = 0.35
+    else:
+        system_prompt = (
+            "You are AhBashin Bot's math tutor. Explain math and statistics results clearly, briefly, "
+            "and accurately for a student. The bot's deterministic math module already performed the "
+            "calculation, so do not override or contradict it. If you notice possible limitations, mention "
+            "them gently. Use step-by-step explanations when useful, but keep the answer concise."
+        )
+        final_instruction = (
+            "Explain what this result means, what mathematical idea is involved, and how the user should interpret it. "
+            "For plots, explain the axes, shape, and important features."
+        )
+        title = "AI math explanation 🧠\n\n"
+        temperature = 0.25
+
+    system_prompt += f"\n\nRespond in {language}."
 
     prompt_parts = [
         f"Math command: /{command_name}",
@@ -316,26 +392,31 @@ async def send_math_ai_explanation(
     if deterministic_context:
         prompt_parts.append(f"Result/context from the math module:\n{deterministic_context}")
 
-    prompt_parts.append(
-        "Explain what this result means, what mathematical idea is involved, and how the user should interpret it. "
-        "For plots, explain the axes, shape, and important features."
-    )
+    prompt_parts.append(final_instruction)
 
     try:
-        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
     except Exception as error:
-        await update.message.reply_text(f"AI math explanation error.\n\nError: {error}")
+        label = "tutor" if is_tutor else "explanation"
+        await update.message.reply_text(f"AI math {label} error.\n\nError: {error}")
         return
 
-    text = "AI math explanation 🧠\n\n" + explanation
+    text = title + explanation
     for chunk in split_long_text(text, limit=3500):
         await update.message.reply_text(chunk)
 
 
+def detect_math_ai_mode(args: Sequence[str]) -> str:
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in {"tutor", "teach", "lesson"}:
+            return "tutor"
+    return "explain"
 def math_ai_wrapper(command_name: str, handler):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         original_args = list(getattr(context, "args", []) or [])
-        cleaned_args, wants_ai = split_math_ai_request(original_args)
+        cleaned_args, wants_ai, ai_language = split_math_ai_request(original_args)
+        ai_mode = detect_math_ai_mode(original_args)
         context.args = cleaned_args
 
         try:
@@ -348,11 +429,11 @@ def math_ai_wrapper(command_name: str, handler):
                 update,
                 command_name=command_name,
                 user_input=" ".join(cleaned_args),
+                mode=ai_mode,
+                language=ai_language,
             )
 
     return wrapped
-
-
 async def math_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explain a math request/result using AI.
 
@@ -388,6 +469,49 @@ async def math_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         command_name="math_ai",
         user_input=text,
         deterministic_context=text,
+    )
+
+
+
+async def math_tutor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dedicated math tutor mode.
+
+    Usage:
+    /math_tutor explain derivatives
+    /math_tutor solve x^2 - 5x + 6 = 0
+    or reply to a math result/problem with /math_tutor
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    text, tutor_language = extract_tutor_language(text)
+
+    if not text:
+        await update.message.reply_text(
+            "Math tutor usage:\n\nDefault language is English. Add fa, de, it, fr, es, or ar after the tutor command.\n\nLanguage examples:\n/math_tutor fa explain derivatives\n/math_tutor de solve x^2 - 5x + 6 = 0\n/math_tutor it teach me integration by parts\n\n"
+            "/math_tutor explain derivatives\n"
+            "/math_tutor solve x^2 - 5x + 6 = 0\n"
+            "/math_tutor teach me integration by parts\n\n"
+            "Or reply to a math result/problem with /math_tutor"
+        )
+        return
+
+    await send_math_ai_explanation(
+        update,
+        command_name="math_tutor",
+        user_input=text,
+        deterministic_context=text,
+        mode="tutor",
+        language=tutor_language,
     )
 
 
@@ -1805,11 +1929,14 @@ def math_help_text() -> str:
         "/fibspiral 10\n"
         "/polarplot 1 + sin(theta) range 0 6.28\n"
         "/paramplot cos(t); sin(t) range 0 6.28\n\n"
-        "AI explanation:\n"
-        "Add ai, explain, or interpret to most math commands.\n"
+        "AI explanation and tutor mode:\n"
+        "Add ai/explain/interpret to most math commands for a short explanation.\n"
+        "Add tutor for a deeper lesson-style answer.\n"
         "/stats 4,7,9,10 explain\n"
         "/plot sin(x) range -6.28 6.28 ai\n"
-        "Or reply to a math result with /math_ai"
+        "/integral x^2 from 0 to 3 tutor\n"
+        "/math_tutor teach me quadratic equations\n"
+        "Or reply to a math result with /math_ai or /math_tutor"
     )
 
 
@@ -1860,5 +1987,8 @@ def register_math_handlers(app: Application) -> None:
 
     app.add_handler(CommandHandler("math_ai", math_ai_command))
     app.add_handler(CommandHandler("mathai", math_ai_command))
+    app.add_handler(CommandHandler("math_tutor", math_tutor_command))
+    app.add_handler(CommandHandler("mathtutor", math_tutor_command))
+    app.add_handler(CommandHandler("tutor_math", math_tutor_command))
     app.add_handler(CommandHandler("mathhelp", mathhelp_command))
 

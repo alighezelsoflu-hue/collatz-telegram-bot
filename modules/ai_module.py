@@ -133,7 +133,7 @@ async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4
 
     if provider == "openrouter":
         site_url = os.getenv("OPENROUTER_SITE_URL", "https://collatz-telegram-bot.onrender.com")
-        app_name = os.getenv("OPENROUTER_APP_NAME", "LakLak Telegram Bot")
+        app_name = os.getenv("OPENROUTER_APP_NAME", "AhBashin Telegram Bot")
         headers["HTTP-Referer"] = site_url
         headers["X-Title"] = app_name
 

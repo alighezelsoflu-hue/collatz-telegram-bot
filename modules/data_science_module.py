@@ -31,44 +31,158 @@ except Exception:
 
 
 # ------------------------------------------------------------
-# AI integration
+# Optional AI integration + multilingual tutor mode
 # ------------------------------------------------------------
 
-AI_REQUEST_WORDS = {"ai", "explain", "interpret", "summary", "summarize", "insight", "insights"}
+AI_REQUEST_WORDS = {
+    "ai", "explain", "explanation", "interpret", "summary", "summarize",
+    "insight", "insights", "tutor", "teach", "lesson",
+}
+AI_TUTOR_WORDS = {"tutor", "teach", "lesson"}
 AI_SUMMARY_MAX_CHARS = 5200
 
+TUTOR_LANGUAGES = {
+    "en": "English",
+    "english": "English",
+    "fa": "Persian/Farsi",
+    "farsi": "Persian/Farsi",
+    "persian": "Persian/Farsi",
+    "de": "German",
+    "german": "German",
+    "it": "Italian",
+    "italian": "Italian",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+}
 
-def extract_ai_request(text: str) -> Tuple[bool, str]:
-    """Return (ai_requested, cleaned_text).
 
-    Users can add words like `ai`, `explain`, or `interpret` to a data-science command.
-    The cleaned text is sent to the deterministic parser so the AI flag does not break
-    column names, numeric parsing, or command options.
+def normalize_tutor_token(token: str) -> str:
+    return token.strip().lower().strip(",.;:!?()[]{}")
+
+
+def language_from_token(token: str) -> Optional[str]:
+    return TUTOR_LANGUAGES.get(normalize_tutor_token(token))
+
+
+def extract_tutor_language(text: str) -> Tuple[str, str]:
+    """Return (text_without_initial_language_code, language_name)."""
+    parts = text.strip().split()
+    if not parts:
+        return "", "English"
+
+    language = language_from_token(parts[0])
+    if language:
+        return " ".join(parts[1:]).strip(), language
+
+    return text.strip(), "English"
+
+
+def extract_ai_request(text: str) -> Tuple[bool, str, str, str]:
+    """Return (ai_requested, cleaned_text, ai_mode, language).
+
+    Users can add words like `ai`, `explain`, `interpret`, or `tutor` to a
+    data-science command. Tutor can also take a language code:
+
+    /forecast steps 5 | 10,12,15 tutor fa
+    /linear_regression 1,2; 2,4 explain de
+
+    The cleaned text is sent to the deterministic parser so AI flags and
+    language codes do not break numeric parsing, column names, or options.
     """
     raw = (text or "").strip()
     if not raw:
-        return False, ""
+        return False, "", "summary", "English"
 
     requested = False
-    cleaned_tokens = []
-    for token in raw.split():
-        bare = token.strip().lower().strip(",.;:!?()[]{}")
+    mode = "summary"
+    language = "English"
+    cleaned_tokens: List[str] = []
+    tokens = raw.split()
+    index = 0
+
+    while index < len(tokens):
+        token = tokens[index]
+        bare = normalize_tutor_token(token)
+
         if bare in AI_REQUEST_WORDS:
             requested = True
-            continue
-        cleaned_tokens.append(token)
+            if bare in AI_TUTOR_WORDS:
+                mode = "tutor"
 
-    return requested, " ".join(cleaned_tokens).strip()
+            # Optional language immediately after any AI trigger.
+            if index + 1 < len(tokens):
+                selected_language = language_from_token(tokens[index + 1])
+                if selected_language:
+                    language = selected_language
+                    index += 2
+                    continue
+
+            index += 1
+            continue
+
+        cleaned_tokens.append(token)
+        index += 1
+
+    return requested, " ".join(cleaned_tokens).strip(), mode, language
 
 
 def ai_help_suffix() -> str:
     return (
-        "\n\nAI summary: add `ai` or `explain` to most data-science commands, for example:\n"
+        "\n\nAI summary and tutor mode:\n"
+        "Add `ai`, `explain`, `interpret`, or `tutor` to most data-science commands.\n"
+        "Default language is English. Add a language code after tutor/explain: en, fa, de, it, fr, es, ar.\n\n"
+        "Examples:\n"
         "/data_summary 4,7,9,10,10,12 ai\n"
-        "/poly_regression degree 2 | 1,2; 2,5; 3,10 explain\n"
+        "/poly_regression degree 2 | 1,2; 2,5; 3,10 tutor fa\n"
+        "/forecast steps 5 | 10,12,13,15,18 explain de\n"
         "Reply to a CSV with /dataset_profile ai\n"
+        "Use /ds_tutor fa explain overfitting\n"
         "You can also reply to any result with /ds_ai."
     )
+
+
+def data_science_summary_system_prompt(language: str = "English") -> str:
+    return (
+        "You are AhBashin Bot's data-science interpreter. Interpret statistical, ML, and CSV results "
+        "clearly, briefly, and accurately. Do not invent hidden data. Do not replace or contradict "
+        "deterministic calculations from the bot. Mention uncertainty, assumptions, and limitations when relevant. "
+        "Explain for a smart beginner, not as a long academic paper. "
+        f"Respond in {language}."
+    )
+
+
+def data_science_tutor_system_prompt(language: str = "English") -> str:
+    return (
+        "You are AhBashin Bot's dedicated Data Science AI Tutor. Teach statistics, machine learning, "
+        "CSV analysis, regression, classification, clustering, PCA, forecasting, and hypothesis testing like a patient human tutor. "
+        "Start with the big idea, define important terms, explain the intuition, then explain the calculation or result step by step. "
+        "When a deterministic bot result is provided, treat it as the source of truth and do not change it. "
+        "Mention common mistakes, assumptions, and how to check whether the method is appropriate. "
+        "Use simple examples when helpful. Keep the answer focused and student-friendly. "
+        f"Respond in {language}."
+    )
+
+
+try:
+    from modules.ai_module import call_ai
+except Exception:
+    call_ai = None
+
+
+async def send_ai_text_output(update: Update, output: str, filename: str, caption: str) -> None:
+    if not update.message:
+        return
+    if len(output) <= 3500:
+        await update.message.reply_text(output)
+    elif len(output) <= 10000:
+        for chunk in split_long_text(output, limit=3500):
+            await update.message.reply_text(chunk)
+    else:
+        await update.message.reply_document(document=text_to_file(output, filename), caption=caption)
 
 
 async def send_data_science_ai_summary(
@@ -77,18 +191,14 @@ async def send_data_science_ai_summary(
     result_text: str,
     original_input: str = "",
     extra_context: str = "",
+    mode: str = "summary",
+    language: str = "English",
 ) -> None:
-    """Send an AI interpretation of a deterministic data-science result.
-
-    This does not replace the module's calculations. It asks the AI module to explain
-    the already-computed result, mention limitations, and suggest next steps.
-    """
+    """Send an AI interpretation or tutor explanation of a deterministic DS result."""
     if not update.message:
         return
 
-    try:
-        from modules.ai_module import call_ai
-    except Exception:
+    if call_ai is None:
         await update.message.reply_text(
             "AI summary is not available because modules/ai_module.py could not be imported.\n"
             "Make sure ai_module.py exists and is registered in main.py."
@@ -97,43 +207,96 @@ async def send_data_science_ai_summary(
 
     safe_result = (result_text or "").strip()
     if len(safe_result) > AI_SUMMARY_MAX_CHARS:
-        safe_result = safe_result[:AI_SUMMARY_MAX_CHARS] + "\n\n[Result was truncated before AI summary.]"
+        safe_result = safe_result[:AI_SUMMARY_MAX_CHARS] + "\n\n[Result was truncated before AI response.]"
 
-    prompt_parts = [
-        f"Data-science task: {title}",
-    ]
+    mode = (mode or "summary").lower()
+    is_tutor = mode == "tutor"
+
+    prompt_parts = [f"Data-science task: {title}"]
     if original_input.strip():
         prompt_parts.append("User input or command arguments:\n" + original_input.strip()[:1500])
     if extra_context.strip():
         prompt_parts.append("Extra context:\n" + extra_context.strip()[:1500])
-    prompt_parts.append("Deterministic bot result:\n" + safe_result)
-    prompt_parts.append(
-        "Explain the result for a non-expert. Include: 1) key insight, "
-        "2) what the numbers mean, 3) limitations/cautions, and 4) one sensible next step. "
-        "Do not recompute or contradict the deterministic result."
-    )
+    if safe_result:
+        prompt_parts.append("Deterministic bot result:\n" + safe_result)
 
-    system_prompt = (
-        "You are AhBashin Bot's data-science tutor. Interpret statistical and ML results clearly, "
-        "briefly, and accurately. Do not invent hidden data. Do not replace deterministic calculations. "
-        "Mention uncertainty and limitations when relevant."
+    if is_tutor:
+        system_prompt = data_science_tutor_system_prompt(language)
+        prompt_parts.append(
+            "Tutor the user on this data-science result or topic. Structure the answer as:\n"
+            "1) Big idea\n2) What the numbers/method mean\n3) Step-by-step interpretation\n"
+            "4) Common mistake or limitation\n5) A good next step or practice question."
+        )
+        header = "AI data-science tutor 🧑‍🏫📊\n\n"
+        temperature = 0.35
+        filename = "data_science_ai_tutor.txt"
+        caption = "AI data-science tutor"
+    else:
+        system_prompt = data_science_summary_system_prompt(language)
+        prompt_parts.append(
+            "Explain the result for a non-expert. Include: 1) key insight, "
+            "2) what the numbers mean, 3) limitations/cautions, and 4) one sensible next step. "
+            "Do not recompute or contradict the deterministic result."
+        )
+        header = "AI data-science summary 🤖📊\n\n"
+        temperature = 0.25
+        filename = "data_science_ai_summary.txt"
+        caption = "AI data-science summary"
+
+    try:
+        await update.message.chat.send_action(action="typing")
+        answer = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
+    except Exception as error:
+        await update.message.reply_text(f"AI data-science {mode} error.\n\n{error}")
+        return
+
+    await send_ai_text_output(update, header + answer, filename=filename, caption=caption)
+
+
+async def send_data_science_tutor_response(
+    update: Update,
+    user_text: str,
+    language: str = "English",
+) -> None:
+    if not update.message:
+        return
+
+    if call_ai is None:
+        await update.message.reply_text(
+            "AI tutor is not available because modules/ai_module.py could not be imported."
+        )
+        return
+
+    user_text = user_text.strip()
+    if not user_text:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/ds_tutor explain overfitting\n"
+            "/ds_tutor fa explain overfitting\n"
+            "/ds_tutor de explain R squared\n"
+            "/ds_tutor it explain p-value"
+        )
+        return
+
+    prompt = (
+        "Tutor the user on this data-science/statistics/ML topic or question:\n\n"
+        f"{user_text}\n\n"
+        "Use the structure: Big idea, intuition, step-by-step explanation, common mistake, and one practice question."
     )
 
     try:
         await update.message.chat.send_action(action="typing")
-        answer = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+        answer = await call_ai(data_science_tutor_system_prompt(language), prompt, temperature=0.35)
     except Exception as error:
-        await update.message.reply_text(f"AI data-science summary error.\n\n{error}")
+        await update.message.reply_text(f"AI data-science tutor error.\n\n{error}")
         return
 
-    output = "AI data-science summary 🤖📊\n\n" + answer
-    if len(output) <= 3500:
-        await update.message.reply_text(output)
-    elif len(output) <= 10000:
-        for chunk in split_long_text(output, limit=3500):
-            await update.message.reply_text(chunk)
-    else:
-        await update.message.reply_document(document=text_to_file(output, "data_science_ai_summary.txt"), caption="AI data-science summary")
+    await send_ai_text_output(
+        update,
+        "AI data-science tutor 🧑‍🏫📊\n\n" + answer,
+        filename="data_science_ai_tutor.txt",
+        caption="AI data-science tutor",
+    )
 
 
 async def maybe_send_data_science_ai_summary(
@@ -143,10 +306,19 @@ async def maybe_send_data_science_ai_summary(
     result_text: str,
     original_input: str = "",
     extra_context: str = "",
+    mode: str = "summary",
+    language: str = "English",
 ) -> None:
     if ai_requested:
-        await send_data_science_ai_summary(update, title, result_text, original_input, extra_context)
-
+        await send_data_science_ai_summary(
+            update,
+            title,
+            result_text,
+            original_input,
+            extra_context,
+            mode=mode,
+            language=language,
+        )
 
 
 # ------------------------------------------------------------
@@ -221,10 +393,12 @@ def ds_help_text() -> str:
         "/pairplot col1 col2 col3 - CSV scatter matrix, max 4 columns\n\n"
         "CSV usage: reply to a CSV file with the command, or upload a CSV with the command as caption.\n\n"
         "AI summaries:\n"
-        "Add ai or explain to most commands for an AI interpretation after the deterministic result.\n"
+        "Add ai, explain, interpret, or tutor to most commands for AI interpretation/tutor mode.\n"
+        "Default tutor language is English. Use language codes: en, fa, de, it, fr, es, ar.\n"
         "/data_summary 4,7,9,10,10,12 ai\n"
-        "/forecast steps 5 | 10,12,13,15,18 explain\n"
+        "/forecast steps 5 | 10,12,13,15,18 tutor fa\n"
         "Reply to a CSV with /dataset_profile ai\n"
+        "/ds_tutor fa explain overfitting - dedicated data-science tutor\n"
         "/ds_ai - summarize a replied-to data-science result\n\n"
         "Limits:\n"
         f"numbers: {MAX_NUMBERS}, points: {MAX_POINTS}, CSV: 1 MB / {MAX_CSV_ROWS} rows / {MAX_CSV_COLUMNS} columns"
@@ -500,7 +674,7 @@ async def data_summary_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         values = parse_numbers_from_text(clean_text)
@@ -515,7 +689,7 @@ async def data_summary_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     await update.message.reply_text(report)
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Data summary", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Data summary", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -603,7 +777,7 @@ async def histogram_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         values, bins = parse_histogram_input(clean_text)
@@ -625,7 +799,7 @@ async def histogram_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Minimum: {nice_number(min(values))}\nMaximum: {nice_number(max(values))}\n"
         f"Mean: {nice_number(mean(values))}"
     )
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Histogram", histogram_report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Histogram", histogram_report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -713,7 +887,7 @@ async def boxplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         values = parse_numbers_from_text(clean_text)
@@ -742,7 +916,7 @@ async def boxplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"IQR: {nice_number(stats['iqr'])}\n"
         f"Outliers: {', '.join(nice_number(v) for v in stats['outliers']) if stats['outliers'] else 'None'}"
     )
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Box plot", boxplot_report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Box plot", boxplot_report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -856,7 +1030,7 @@ async def correlation_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         points = parse_points(clean_text, max_points=MAX_POINTS)
@@ -876,7 +1050,7 @@ async def correlation_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     report = f"Pearson correlation 📈\n\nr = {nice_number(r)}\n{correlation_strength(r)}"
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="correlation.png"), caption="Correlation scatter plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Pearson correlation", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Pearson correlation", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 async def linear_regression_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -884,7 +1058,7 @@ async def linear_regression_command(update: Update, context: ContextTypes.DEFAUL
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         points = parse_points(clean_text, max_points=MAX_POINTS)
@@ -911,7 +1085,7 @@ async def linear_regression_command(update: Update, context: ContextTypes.DEFAUL
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="linear_regression.png"), caption="Linear regression plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Linear regression", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Linear regression", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -1030,7 +1204,7 @@ async def kmeans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         k, points = parse_kmeans_input(clean_text)
@@ -1054,7 +1228,7 @@ async def kmeans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     report = "\n".join(lines)
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="kmeans.png"), caption="K-means clustering plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means clustering", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means clustering", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -1090,7 +1264,7 @@ async def outliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         method, data_text = split_method_and_data(clean_text, "iqr")
@@ -1132,7 +1306,7 @@ async def outliers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"{detail}"
     )
     await update.message.reply_text(report)
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Outlier detection", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Outlier detection", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 def normalize_values(values: List[float], method: str) -> List[float]:
@@ -1157,7 +1331,7 @@ async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         method, data_text = split_method_and_data(clean_text, "minmax")
@@ -1180,7 +1354,7 @@ async def normalize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "normalized_values.txt"), caption="Normalized values")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Normalization", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Normalization", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -1299,7 +1473,7 @@ async def confusion_matrix_command(update: Update, context: ContextTypes.DEFAULT
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         pairs = parse_label_pairs(clean_text)
@@ -1334,7 +1508,7 @@ async def confusion_matrix_command(update: Update, context: ContextTypes.DEFAULT
     report = "\n".join(lines)
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="confusion_matrix.png"), caption="Confusion matrix")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Confusion matrix and classification metrics", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Confusion matrix and classification metrics", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -1467,7 +1641,7 @@ def analyze_csv_text(text: str) -> str:
     return "\n".join(lines)
 
 
-async def analyze_document_csv(update: Update, document, ai_requested: bool = False, original_input: str = "") -> None:
+async def analyze_document_csv(update: Update, document, ai_requested: bool = False, original_input: str = "", ai_mode: str = "summary", ai_language: str = "English") -> None:
     if not update.message:
         return
 
@@ -1496,7 +1670,7 @@ async def analyze_document_csv(update: Update, document, ai_requested: bool = Fa
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "csv_analysis.txt"), caption="CSV analysis")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV analysis", report, original_input)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV analysis", report, original_input, mode=ai_mode, language=ai_language)
 
 
 async def csv_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1504,15 +1678,15 @@ async def csv_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
     reply = update.message.reply_to_message
 
     if reply and reply.document:
-        await analyze_document_csv(update, reply.document, ai_requested=ai_requested, original_input=clean_text)
+        await analyze_document_csv(update, reply.document, ai_requested=ai_requested, original_input=clean_text, ai_mode=ai_mode, ai_language=ai_language)
         return
 
     if update.message.document:
-        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_text)
+        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_text, ai_mode=ai_mode, ai_language=ai_language)
         return
 
     await update.message.reply_text(
@@ -1543,8 +1717,8 @@ async def csv_document_message_handler(update: Update, context: ContextTypes.DEF
         pass
 
     if command == "/csv_analyze":
-        ai_requested, clean_args_text = extract_ai_request(args_text)
-        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_args_text)
+        ai_requested, clean_args_text, ai_mode, ai_language = extract_ai_request(args_text)
+        await analyze_document_csv(update, update.message.document, ai_requested=ai_requested, original_input=clean_args_text, ai_mode=ai_mode, ai_language=ai_language)
     elif command in {"/corr_matrix", "/corrmatrix"}:
         await corr_matrix_command(update, context)
     elif command == "/pairplot":
@@ -1847,7 +2021,7 @@ async def corr_matrix_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         csv_text = await download_csv_text(update)
@@ -1870,7 +2044,7 @@ async def corr_matrix_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     for col, row in zip(columns, matrix):
         values = ", ".join("NA" if v is None else nice_number(v, 3) for v in row)
         matrix_lines.append(f"{col}: {values}")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV correlation matrix", "\n".join(matrix_lines), clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV correlation matrix", "\n".join(matrix_lines), clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -1936,7 +2110,7 @@ async def pairplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         csv_text = await download_csv_text(update)
@@ -1975,7 +2149,7 @@ async def pairplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"Rows available: {len(rows)}\n"
         "Use the plots to inspect linear/nonlinear relationships, clusters, and outliers."
     )
-    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV pairplot", pairplot_report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "CSV pairplot", pairplot_report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2099,7 +2273,7 @@ async def poly_regression_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         degree, data_text = parse_degree_points_input(clean_text)
@@ -2124,7 +2298,7 @@ async def poly_regression_command(update: Update, context: ContextTypes.DEFAULT_
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="polynomial_regression.png"), caption="Polynomial regression plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Polynomial regression", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Polynomial regression", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2208,7 +2382,7 @@ async def multiple_regression_command(update: Update, context: ContextTypes.DEFA
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         args_text = clean_text
@@ -2248,7 +2422,7 @@ async def multiple_regression_command(update: Update, context: ContextTypes.DEFA
     report = "\n".join(lines)
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="multiple_regression.png"), caption="Predicted vs actual")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Multiple linear regression", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Multiple linear regression", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2342,7 +2516,7 @@ async def logistic_regression_command(update: Update, context: ContextTypes.DEFA
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         points = parse_points(clean_text, max_points=MAX_REGRESSION_POINTS)
@@ -2365,7 +2539,7 @@ async def logistic_regression_command(update: Update, context: ContextTypes.DEFA
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="logistic_regression.png"), caption="Logistic regression plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Logistic regression", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Logistic regression", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2443,7 +2617,7 @@ async def pca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         points = parse_points(clean_text, max_points=MAX_REGRESSION_POINTS)
@@ -2467,7 +2641,7 @@ async def pca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="pca.png"), caption="PCA plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "PCA", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "PCA", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2538,7 +2712,7 @@ async def kmeans_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         max_k, points = parse_kmeans_auto_input(clean_text)
@@ -2564,7 +2738,7 @@ async def kmeans_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     report = "\n".join(lines)
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="kmeans_elbow.png"), caption="K-means elbow curve")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means elbow analysis", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "K-means elbow analysis", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2633,7 +2807,7 @@ async def moving_average_command(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         window, values = parse_window_values_input(clean_text)
@@ -2654,7 +2828,7 @@ async def moving_average_command(update: Update, context: ContextTypes.DEFAULT_T
     report = f"Moving average 📉\n\nWindow: {window}\nValues: {preview}"
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="moving_average.png"), caption="Moving average plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Moving average", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Moving average", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 def parse_forecast_input(text: str) -> Tuple[int, List[float]]:
@@ -2687,7 +2861,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         steps, values = parse_forecast_input(clean_text)
@@ -2713,7 +2887,7 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     await update.message.reply_text(report)
     await update.message.reply_photo(photo=InputFile(image, filename="forecast.png"), caption="Forecast plot")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Simple trend forecast", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Simple trend forecast", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -2809,7 +2983,7 @@ async def ttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         parsed = parse_ttest_input(clean_text)
@@ -2846,7 +3020,7 @@ async def ttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     await update.message.reply_text(report)
-    await maybe_send_data_science_ai_summary(update, ai_requested, "t-test", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "t-test", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 def chi_square_survival_approx(chi2: float, df: int) -> float:
@@ -2893,7 +3067,7 @@ async def chisquare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         observed, expected = parse_chisquare_input(clean_text)
@@ -2922,7 +3096,7 @@ async def chisquare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"{rows_text}"
     )
     await update.message.reply_text(report)
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Chi-square goodness-of-fit test", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Chi-square goodness-of-fit test", report, clean_text, mode=ai_mode, language=ai_language)
 
 
 # ------------------------------------------------------------
@@ -3023,7 +3197,7 @@ async def dataset_profile_command(update: Update, context: ContextTypes.DEFAULT_
         return
 
     raw_text = " ".join(context.args)
-    ai_requested, clean_text = extract_ai_request(raw_text)
+    ai_requested, clean_text, ai_mode, ai_language = extract_ai_request(raw_text)
 
     try:
         csv_text = await download_csv_text(update)
@@ -3041,7 +3215,7 @@ async def dataset_profile_command(update: Update, context: ContextTypes.DEFAULT_
         await update.message.reply_text(report)
     else:
         await update.message.reply_document(document=text_to_file(report, "dataset_profile.txt"), caption="Advanced dataset profile")
-    await maybe_send_data_science_ai_summary(update, ai_requested, "Advanced dataset profile", report, clean_text)
+    await maybe_send_data_science_ai_summary(update, ai_requested, "Advanced dataset profile", report, clean_text, mode=ai_mode, language=ai_language)
 
 # ------------------------------------------------------------
 # Help and registration
@@ -3073,6 +3247,35 @@ async def ds_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         result_text=text,
         original_input="/ds_ai",
     )
+
+
+
+async def ds_tutor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    text, language = extract_tutor_language(text)
+
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/ds_tutor explain overfitting\n"
+            "/ds_tutor fa explain overfitting\n"
+            "/ds_tutor de explain R squared\n"
+            "/ds_tutor it explain p-value\n\n"
+            "Supported languages: en, fa, de, it, fr, es, ar"
+        )
+        return
+
+    await send_data_science_tutor_response(update, text, language=language)
 
 
 async def dshelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3124,6 +3327,12 @@ def register_data_science_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("pairplot", pairplot_command))
     app.add_handler(CommandHandler("dataset_profile", dataset_profile_command))
     app.add_handler(CommandHandler("profile_csv", dataset_profile_command))
+
+    app.add_handler(CommandHandler("ds_tutor", ds_tutor_command))
+    app.add_handler(CommandHandler("dstutor", ds_tutor_command))
+    app.add_handler(CommandHandler("tutor_ds", ds_tutor_command))
+    app.add_handler(CommandHandler("data_tutor", ds_tutor_command))
+    app.add_handler(CommandHandler("data_science_tutor", ds_tutor_command))
 
     app.add_handler(CommandHandler("ds_ai", ds_ai_command))
     app.add_handler(CommandHandler("dsai", ds_ai_command))

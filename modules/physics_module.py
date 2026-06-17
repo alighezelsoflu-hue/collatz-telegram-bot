@@ -195,6 +195,46 @@ def split_long_text(text: str, limit: int = 3500) -> List[str]:
 
 PHYSICS_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
 
+
+TUTOR_LANGUAGES = {
+    "en": "English",
+    "english": "English",
+    "fa": "Persian/Farsi",
+    "farsi": "Persian/Farsi",
+    "persian": "Persian/Farsi",
+    "de": "German",
+    "german": "German",
+    "it": "Italian",
+    "italian": "Italian",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+}
+
+
+def normalize_tutor_token(token: str) -> str:
+    return token.strip().lower().strip(".,!?:;()[]{}")
+
+
+def language_from_token(token: str):
+    return TUTOR_LANGUAGES.get(normalize_tutor_token(token))
+
+
+def extract_tutor_language(text: str) -> tuple[str, str]:
+    """Return (text_without_initial_language_code, language_name)."""
+    parts = text.strip().split()
+    if not parts:
+        return "", "English"
+
+    language = language_from_token(parts[0])
+    if language:
+        return " ".join(parts[1:]).strip(), language
+
+    return text.strip(), "English"
+
 try:
     from modules.ai_module import call_ai, AIProviderError
 except Exception:
@@ -204,24 +244,31 @@ except Exception:
         pass
 
 
-def split_physics_ai_request(args: Sequence[str]) -> Tuple[List[str], bool]:
-    """Remove optional AI trigger words from a physics command.
-
-    Examples:
-    /projectile speed=20 angle=45 explain -> normal physics result + AI explanation
-    /ohm V=12 R=4 ai -> normal Ohm result + AI explanation
-    """
+def split_physics_ai_request(args: Sequence[str]) -> Tuple[List[str], bool, str]:
+    """Remove optional AI/tutor trigger words and optional tutor language."""
     cleaned: List[str] = []
     wants_ai = False
+    language = "English"
+    skip_next = False
 
-    for arg in args:
-        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
-        if normalized in PHYSICS_AI_TRIGGER_WORDS:
-            wants_ai = True
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
             continue
+
+        normalized = normalize_tutor_token(arg)
+        if normalized in PHYSICS_AI_TRIGGER_WORDS or normalized in {"teach", "lesson"}:
+            wants_ai = True
+            if normalized in {"tutor", "teach", "lesson"} and index + 1 < len(args):
+                selected_language = language_from_token(args[index + 1])
+                if selected_language:
+                    language = selected_language
+                    skip_next = True
+            continue
+
         cleaned.append(arg)
 
-    return cleaned, wants_ai
+    return cleaned, wants_ai, language
 
 
 async def send_physics_ai_explanation(
@@ -229,6 +276,8 @@ async def send_physics_ai_explanation(
     command_name: str,
     user_input: str,
     deterministic_context: str = "",
+    mode: str = "explain",
+    language: str = "English",
 ) -> None:
     if not update.message:
         return
@@ -245,12 +294,38 @@ async def send_physics_ai_explanation(
     if deterministic_context and len(deterministic_context) > 2500:
         deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
 
-    system_prompt = (
-        "You are AhBashin Bot's physics tutor. Explain physics calculator results clearly, briefly, "
-        "and accurately for a student. The deterministic physics module already performed the "
-        "calculation, so do not override or contradict it. Explain units, formulas, assumptions, "
-        "and how to interpret plots when relevant. Keep the answer concise."
-    )
+    is_tutor = mode.lower() == "tutor"
+
+    if is_tutor:
+        system_prompt = (
+            "You are AhBashin Bot's dedicated Physics AI Tutor. Teach physics like a patient, "
+            "expert human tutor. Build intuition first, then equations. Always identify known values, "
+            "unknown values, units, assumptions, and the formula being used. Show dimensional/unit checks "
+            "when helpful. Explain signs, directions, vectors, and physical meaning. If a deterministic result "
+            "from the physics module is provided, do not override it; explain it. Keep answers clear, friendly, "
+            "and student-focused."
+        )
+        final_instruction = (
+            "Tutor the user on this physics topic/problem. Structure the answer as:\n"
+            "1) Intuition\n2) Given/unknown quantities\n3) Formula and steps\n4) Unit check or physical interpretation\n5) Quick practice question."
+        )
+        title = "AI physics tutor 🧑‍🏫⚛️\n\n"
+        temperature = 0.35
+    else:
+        system_prompt = (
+            "You are AhBashin Bot's physics tutor. Explain physics calculator results clearly, briefly, "
+            "and accurately for a student. The deterministic physics module already performed the "
+            "calculation, so do not override or contradict it. Explain units, formulas, assumptions, "
+            "and physical meaning. Keep the answer concise."
+        )
+        final_instruction = (
+            "Explain what this physics result means, which formula or concept is involved, "
+            "and how the user should interpret it. For plots, explain the axes, curve shape, and important features."
+        )
+        title = "AI physics explanation 🧠⚛️\n\n"
+        temperature = 0.25
+
+    system_prompt += f"\n\nRespond in {language}."
 
     prompt_parts = [
         f"Physics command: /{command_name}",
@@ -260,26 +335,31 @@ async def send_physics_ai_explanation(
     if deterministic_context:
         prompt_parts.append(f"Result/context from the physics module:\n{deterministic_context}")
 
-    prompt_parts.append(
-        "Explain what this physics result means, which formula or concept is involved, "
-        "and how the user should interpret it. For plots, explain the axes, curve shape, and important features."
-    )
+    prompt_parts.append(final_instruction)
 
     try:
-        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
     except Exception as error:
-        await update.message.reply_text(f"AI physics explanation error.\n\nError: {error}")
+        label = "tutor" if is_tutor else "explanation"
+        await update.message.reply_text(f"AI physics {label} error.\n\nError: {error}")
         return
 
-    text = "AI physics explanation 🧠⚛️\n\n" + explanation
+    text = title + explanation
     for chunk in split_long_text(text, limit=3500):
         await update.message.reply_text(chunk)
 
 
+def detect_physics_ai_mode(args: Sequence[str]) -> str:
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in {"tutor", "teach", "lesson"}:
+            return "tutor"
+    return "explain"
 def physics_ai_wrapper(command_name: str, handler):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         original_args = list(getattr(context, "args", []) or [])
-        cleaned_args, wants_ai = split_physics_ai_request(original_args)
+        cleaned_args, wants_ai, ai_language = split_physics_ai_request(original_args)
+        ai_mode = detect_physics_ai_mode(original_args)
         context.args = cleaned_args
 
         try:
@@ -292,11 +372,11 @@ def physics_ai_wrapper(command_name: str, handler):
                 update,
                 command_name=command_name,
                 user_input=" ".join(cleaned_args),
+                mode=ai_mode,
+                language=ai_language,
             )
 
     return wrapped
-
-
 async def physics_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explain a physics request/result using AI.
 
@@ -332,6 +412,49 @@ async def physics_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         command_name="physics_ai",
         user_input=text,
         deterministic_context=text,
+    )
+
+
+
+async def physics_tutor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dedicated physics tutor mode.
+
+    Usage:
+    /physics_tutor explain projectile motion
+    /physics_tutor solve speed=20 angle=45 projectile
+    or reply to a physics result/problem with /physics_tutor
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    text, tutor_language = extract_tutor_language(text)
+
+    if not text:
+        await update.message.reply_text(
+            "Physics tutor usage:\n\nDefault language is English. Add fa, de, it, fr, es, or ar after the tutor command.\n\nLanguage examples:\n/physics_tutor fa explain projectile motion\n/physics_tutor de teach me Ohm's law\n/physics_tutor it why does gravity decrease with distance?\n\n"
+            "/physics_tutor explain projectile motion\n"
+            "/physics_tutor teach me Ohm's law\n"
+            "/physics_tutor why does gravity decrease with distance?\n\n"
+            "Or reply to a physics result/problem with /physics_tutor"
+        )
+        return
+
+    await send_physics_ai_explanation(
+        update,
+        command_name="physics_tutor",
+        user_input=text,
+        deterministic_context=text,
+        mode="tutor",
+        language=tutor_language,
     )
 
 
@@ -564,10 +687,12 @@ def physics_help_text() -> str:
         "/gravityplot m1=5.97e24 m2=70 rmin=6.37e6 rmax=5e7\n"
         "/convert 10 m/s to km/h\n"
         "/convert 25 c to k\n\n"
-        "AI explanation:\n"
-        "Add ai/explain to any physics command, example:\n"
+        "AI explanation and tutor mode:\n"
+        "Add ai/explain for a short explanation, or tutor for a deeper lesson.\n"
         "/projectile speed=20 angle=45 explain\n"
-        "/physics_ai - explain a replied physics result\n\n"
+        "/ohm V=12 R=4 tutor\n"
+        "/physics_ai - explain a replied physics result\n"
+        "/physics_tutor - tutor mode for a physics topic or replied result\n\n"
         "Units are SI by default unless a converter unit is given."
     )
 
@@ -1461,6 +1586,9 @@ def register_physics_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("physicshelp", physics_help_command))
     app.add_handler(CommandHandler("physics_ai", physics_ai_command))
     app.add_handler(CommandHandler("physicsai", physics_ai_command))
+    app.add_handler(CommandHandler("physics_tutor", physics_tutor_command))
+    app.add_handler(CommandHandler("physicstutor", physics_tutor_command))
+    app.add_handler(CommandHandler("tutor_physics", physics_tutor_command))
 
     def add(name: str, handler, command_name: str) -> None:
         app.add_handler(CommandHandler(name, physics_ai_wrapper(command_name, handler)))

@@ -26,6 +26,46 @@ MAX_GAS_POINTS = 500
 
 CHEMISTRY_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
 
+
+TUTOR_LANGUAGES = {
+    "en": "English",
+    "english": "English",
+    "fa": "Persian/Farsi",
+    "farsi": "Persian/Farsi",
+    "persian": "Persian/Farsi",
+    "de": "German",
+    "german": "German",
+    "it": "Italian",
+    "italian": "Italian",
+    "fr": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spanish": "Spanish",
+    "ar": "Arabic",
+    "arabic": "Arabic",
+}
+
+
+def normalize_tutor_token(token: str) -> str:
+    return token.strip().lower().strip(".,!?:;()[]{}")
+
+
+def language_from_token(token: str):
+    return TUTOR_LANGUAGES.get(normalize_tutor_token(token))
+
+
+def extract_tutor_language(text: str) -> tuple[str, str]:
+    """Return (text_without_initial_language_code, language_name)."""
+    parts = text.strip().split()
+    if not parts:
+        return "", "English"
+
+    language = language_from_token(parts[0])
+    if language:
+        return " ".join(parts[1:]).strip(), language
+
+    return text.strip(), "English"
+
 try:
     from modules.ai_module import call_ai, AIProviderError
 except Exception:
@@ -53,19 +93,31 @@ def split_long_text(text: str, limit: int = 3500) -> List[str]:
     return chunks
 
 
-def split_chemistry_ai_request(args: List[str]) -> Tuple[List[str], bool]:
-    """Remove optional AI trigger words from a chemistry command."""
+def split_chemistry_ai_request(args: List[str]) -> Tuple[List[str], bool, str]:
+    """Remove optional AI/tutor trigger words and optional tutor language."""
     cleaned: List[str] = []
     wants_ai = False
+    language = "English"
+    skip_next = False
 
-    for arg in args:
-        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
-        if normalized in CHEMISTRY_AI_TRIGGER_WORDS:
-            wants_ai = True
+    for index, arg in enumerate(args):
+        if skip_next:
+            skip_next = False
             continue
+
+        normalized = normalize_tutor_token(arg)
+        if normalized in CHEMISTRY_AI_TRIGGER_WORDS or normalized in {"teach", "lesson"}:
+            wants_ai = True
+            if normalized in {"tutor", "teach", "lesson"} and index + 1 < len(args):
+                selected_language = language_from_token(args[index + 1])
+                if selected_language:
+                    language = selected_language
+                    skip_next = True
+            continue
+
         cleaned.append(arg)
 
-    return cleaned, wants_ai
+    return cleaned, wants_ai, language
 
 
 async def send_chemistry_ai_explanation(
@@ -73,6 +125,8 @@ async def send_chemistry_ai_explanation(
     command_name: str,
     user_input: str,
     deterministic_context: str = "",
+    mode: str = "explain",
+    language: str = "English",
 ) -> None:
     if not update.message:
         return
@@ -89,12 +143,40 @@ async def send_chemistry_ai_explanation(
     if deterministic_context and len(deterministic_context) > 2500:
         deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
 
-    system_prompt = (
-        "You are AhBashin Bot's chemistry tutor. Explain chemistry calculator results clearly, briefly, "
-        "and accurately for a student. The deterministic chemistry module already performed the "
-        "calculation, so do not override or contradict it. Explain formulas, units, assumptions, "
-        "and safety/limitations when relevant. Keep the answer concise."
-    )
+    is_tutor = mode.lower() == "tutor"
+
+    if is_tutor:
+        system_prompt = (
+            "You are AhBashin Bot's dedicated Chemistry AI Tutor. Teach chemistry like a patient, "
+            "expert human tutor. Build conceptual understanding before calculations. For problems, identify "
+            "knowns/unknowns, write the relevant formula or balanced equation, show units, mole ratios, and steps. "
+            "Explain common mistakes such as wrong units, unbalanced equations, or confusing moles and grams. "
+            "Be safety-aware: for hazardous chemicals, reactions, drugs, explosives, or dangerous procedures, give "
+            "high-level educational safety guidance only and do not provide operational instructions. If the chemistry "
+            "module provides a deterministic result, treat it as the source of truth and explain it."
+        )
+        final_instruction = (
+            "Tutor the user on this chemistry topic/problem. Structure the answer as:\n"
+            "1) Big concept\n2) Given/unknown or formula setup\n3) Step-by-step explanation\n"
+            "4) Common mistake or safety note\n5) Quick practice question."
+        )
+        title = "AI chemistry tutor 🧑‍🏫🧪\n\n"
+        temperature = 0.35
+    else:
+        system_prompt = (
+            "You are AhBashin Bot's chemistry tutor. Explain chemistry calculator results clearly, briefly, "
+            "and accurately for a student. The deterministic chemistry module already performed the "
+            "calculation, so do not override or contradict it. Explain formulas, units, assumptions, "
+            "and safety/limitations when relevant. Keep the answer concise."
+        )
+        final_instruction = (
+            "Explain what this chemistry result means, which formula or concept is involved, "
+            "and how the user should interpret it. For plots, explain the axes and relationship shown."
+        )
+        title = "AI chemistry explanation 🧠🧪\n\n"
+        temperature = 0.25
+
+    system_prompt += f"\n\nRespond in {language}."
 
     prompt_parts = [
         f"Chemistry command: /{command_name}",
@@ -104,26 +186,31 @@ async def send_chemistry_ai_explanation(
     if deterministic_context:
         prompt_parts.append(f"Result/context from the chemistry module:\n{deterministic_context}")
 
-    prompt_parts.append(
-        "Explain what this chemistry result means, which formula or concept is involved, "
-        "and how the user should interpret it. For plots, explain the axes and relationship shown."
-    )
+    prompt_parts.append(final_instruction)
 
     try:
-        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
     except Exception as error:
-        await update.message.reply_text(f"AI chemistry explanation error.\n\nError: {error}")
+        label = "tutor" if is_tutor else "explanation"
+        await update.message.reply_text(f"AI chemistry {label} error.\n\nError: {error}")
         return
 
-    text = "AI chemistry explanation 🧠🧪\n\n" + explanation
+    text = title + explanation
     for chunk in split_long_text(text, limit=3500):
         await update.message.reply_text(chunk)
 
 
+def detect_chemistry_ai_mode(args: List[str]) -> str:
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in {"tutor", "teach", "lesson"}:
+            return "tutor"
+    return "explain"
 def chemistry_ai_wrapper(command_name: str, handler):
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         original_args = list(getattr(context, "args", []) or [])
-        cleaned_args, wants_ai = split_chemistry_ai_request(original_args)
+        cleaned_args, wants_ai, ai_language = split_chemistry_ai_request(original_args)
+        ai_mode = detect_chemistry_ai_mode(original_args)
         context.args = cleaned_args
 
         try:
@@ -136,11 +223,11 @@ def chemistry_ai_wrapper(command_name: str, handler):
                 update,
                 command_name=command_name,
                 user_input=" ".join(cleaned_args),
+                mode=ai_mode,
+                language=ai_language,
             )
 
     return wrapped
-
-
 async def chemistry_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explain a chemistry request/result using AI.
 
@@ -176,6 +263,49 @@ async def chemistry_ai_command(update: Update, context: ContextTypes.DEFAULT_TYP
         command_name="chem_ai",
         user_input=text,
         deterministic_context=text,
+    )
+
+
+
+async def chemistry_tutor_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dedicated chemistry tutor mode.
+
+    Usage:
+    /chem_tutor explain stoichiometry
+    /chem_tutor teach me pH
+    or reply to a chemistry result/problem with /chem_tutor
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    text, tutor_language = extract_tutor_language(text)
+
+    if not text:
+        await update.message.reply_text(
+            "Chemistry tutor usage:\n\nDefault language is English. Add fa, de, it, fr, es, or ar after the tutor command.\n\nLanguage examples:\n/chem_tutor fa explain stoichiometry\n/chem_tutor de teach me molarity\n/chem_tutor it why do we balance equations?\n\n"
+            "/chem_tutor explain stoichiometry\n"
+            "/chem_tutor teach me molarity\n"
+            "/chem_tutor why do we balance equations?\n\n"
+            "Or reply to a chemistry result/problem with /chem_tutor"
+        )
+        return
+
+    await send_chemistry_ai_explanation(
+        update,
+        command_name="chem_tutor",
+        user_input=text,
+        deterministic_context=text,
+        mode="tutor",
+        language=tutor_language,
     )
 
 
@@ -1113,6 +1243,11 @@ def register_chemistry_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("chemhelp", chemhelp_command))
     app.add_handler(CommandHandler("chem_ai", chemistry_ai_command))
     app.add_handler(CommandHandler("chemai", chemistry_ai_command))
+    app.add_handler(CommandHandler("chem_tutor", chemistry_tutor_command))
+    app.add_handler(CommandHandler("chemtutor", chemistry_tutor_command))
+    app.add_handler(CommandHandler("chemistry_tutor", chemistry_tutor_command))
+    app.add_handler(CommandHandler("tutor_chem", chemistry_tutor_command))
+    app.add_handler(CommandHandler("tutor_chemistry", chemistry_tutor_command))
 
     def add(names: List[str], handler, command_name: str) -> None:
         wrapped = chemistry_ai_wrapper(command_name, handler)
