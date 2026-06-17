@@ -18,7 +18,7 @@ from modules.group_activity_module import register_group_activity_handlers
 from modules.downloader_module import register_downloader_handlers
 from modules.birthday_module import register_birthday_handlers
 from modules.game_module import register_game_handlers
-
+from modules.ai_module import register_ai_handlers
 
 # ------------------------------------------------------------
 # Config checks
@@ -167,7 +167,7 @@ async def setup_bot_commands() -> None:
     commands = [
         BotCommand("start", "Start bot"),
         BotCommand("help", "Show help"),
-
+        BotCommand("aihelp", "AI text tools help"),
         BotCommand("mathhelp", "Math help"),
         BotCommand("graphhelp", "Graph theory help"),
         BotCommand("dshelp", "Data science help"),
@@ -211,7 +211,7 @@ def register_handlers() -> None:
     register_birthday_handlers(telegram_app)
     register_game_handlers(telegram_app)
     register_photo_handlers(telegram_app)
-
+    register_ai_handlers(telegram_app)
     # Keep this near the end because it includes the silent group activity tracker.
     register_group_activity_handlers(telegram_app)
 
