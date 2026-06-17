@@ -43,6 +43,18 @@ MAX_CSV_BYTES = 1_000_000
 MAX_CSV_ROWS = 5000
 MAX_CSV_COLUMNS = 50
 
+# Advanced feature limits
+MAX_ADVANCED_CSV_NUMERIC_COLUMNS = 12
+MAX_PAIRPLOT_COLUMNS = 4
+MAX_PAIRPLOT_ROWS = 1000
+MAX_POLY_DEGREE = 5
+MAX_REGRESSION_POINTS = 1000
+MAX_MULTI_FEATURES = 8
+MAX_LOGISTIC_ITERATIONS = 2500
+MAX_FORECAST_STEPS = 100
+MAX_TTEST_VALUES = 5000
+MAX_CHISQUARE_CATEGORIES = 50
+
 
 # ------------------------------------------------------------
 # General helpers
@@ -59,24 +71,39 @@ def ds_help_text() -> str:
         "/histogram 4,5,5,6,7,8,8,9 - histogram image\n"
         "/histogram bins 5 | 4,5,5,6,7,8,8,9 - custom bins\n"
         "/boxplot 3,4,5,5,6,7,8,20 - box plot image\n\n"
-        "Relationships:\n"
+        "Relationships and regression:\n"
         "/correlation 1,2; 2,4; 3,5; 4,8 - Pearson correlation\n"
-        "/linear_regression 1,2; 2,4; 3,5; 4,8 - regression plot\n\n"
-        "ML demos:\n"
+        "/linear_regression 1,2; 2,4; 3,5; 4,8 - simple linear regression\n"
+        "/poly_regression degree 2 | 1,2; 2,5; 3,10 - polynomial regression\n"
+        "/multiple_regression target=price features=size,rooms - CSV multiple regression\n"
+        "/logistic_regression 1,0; 2,0; 4,1; 5,1 - binary logistic regression\n\n"
+        "Clustering and dimension reduction:\n"
         "/kmeans 2 | 1,1; 1,2; 8,8; 9,8 - k-means clustering\n"
+        "/kmeans_auto maxk 6 | 1,1; 1,2; 8,8; 9,8 - elbow curve\n"
+        "/pca 1,2; 2,3; 3,5; 4,6 - 2D principal component analysis\n\n"
+        "Time series:\n"
+        "/moving_average window 3 | 10,12,13,15,14 - moving average plot\n"
+        "/forecast steps 5 | 10,12,13,15,18 - simple trend forecast\n\n"
+        "Data cleaning and transforms:\n"
         "/outliers iqr | 3,4,5,5,6,7,8,20 - IQR outliers\n"
         "/outliers zscore | 10,11,12,13,100 - z-score outliers\n"
         "/normalize minmax | 10,20,30,40 - min-max scaling\n"
         "/normalize zscore | 10,20,30,40 - z-score normalization\n\n"
-        "Classification:\n"
-        "/confusion_matrix cat,cat; dog,cat; dog,dog - metrics and matrix\n\n"
-        "CSV:\n"
-        "Reply to a CSV file with /csv_analyze\n"
-        "or upload a CSV file with caption /csv_analyze\n\n"
+        "Classification and statistics:\n"
+        "/confusion_matrix cat,cat; dog,cat; dog,dog - metrics and matrix\n"
+        "/ttest one_sample mean=10 | 9,10,11,12,8 - t-test\n"
+        "/ttest two_sample | 9,10,11,12 ; 14,15,13,16 - Welch two-sample t-test\n"
+        "/chisquare 20,30,25,25 - chi-square goodness-of-fit\n"
+        "/chisquare observed 18,22,30 expected 20,20,30 - custom expected counts\n\n"
+        "CSV tools:\n"
+        "/csv_analyze - basic CSV report\n"
+        "/dataset_profile - advanced CSV profile report\n"
+        "/corr_matrix - CSV correlation heatmap\n"
+        "/pairplot col1 col2 col3 - CSV scatter matrix, max 4 columns\n\n"
+        "CSV usage: reply to a CSV file with the command, or upload a CSV with the command as caption.\n\n"
         "Limits:\n"
         f"numbers: {MAX_NUMBERS}, points: {MAX_POINTS}, CSV: 1 MB / {MAX_CSV_ROWS} rows / {MAX_CSV_COLUMNS} columns"
     )
-
 
 def load_font(size: int = 22):
     possible_fonts = [
@@ -1319,13 +1346,1456 @@ async def csv_document_message_handler(update: Update, context: ContextTypes.DEF
     if not update.message or not update.message.document:
         return
 
-    caption = update.message.caption or ""
-
-    if not caption.strip().startswith("/csv_analyze"):
+    caption = (update.message.caption or "").strip()
+    if not caption.startswith("/"):
         return
 
-    await analyze_document_csv(update, update.message.document)
+    command_token = caption.split(maxsplit=1)[0]
+    command = command_token.split("@", 1)[0].lower()
+    args_text = caption[len(command_token):].strip()
 
+    # CommandHandler usually handles text commands, while this handler makes
+    # CSV commands work when the command is used as a document caption.
+    try:
+        context.args = args_text.split()
+    except Exception:
+        pass
+
+    if command == "/csv_analyze":
+        await analyze_document_csv(update, update.message.document)
+    elif command in {"/corr_matrix", "/corrmatrix"}:
+        await corr_matrix_command(update, context)
+    elif command == "/pairplot":
+        await pairplot_command(update, context)
+    elif command in {"/multiple_regression", "/multireg"}:
+        await multiple_regression_command(update, context)
+    elif command in {"/dataset_profile", "/profile_csv"}:
+        await dataset_profile_command(update, context)
+
+
+
+# ------------------------------------------------------------
+# Advanced CSV helpers
+# ------------------------------------------------------------
+
+def get_csv_document(update: Update):
+    if not update.message:
+        return None
+
+    if update.message.document:
+        return update.message.document
+
+    reply = update.message.reply_to_message
+    if reply and reply.document:
+        return reply.document
+
+    return None
+
+
+async def download_csv_text(update: Update) -> str:
+    document = get_csv_document(update)
+
+    if document is None:
+        raise ValueError("Reply to a CSV file with this command, or upload a CSV with the command as caption.")
+
+    if not document.file_name or not document.file_name.lower().endswith(".csv"):
+        raise ValueError("Please use a .csv file.")
+
+    if document.file_size and document.file_size > MAX_CSV_BYTES:
+        raise ValueError(f"CSV is too large. Maximum file size is {MAX_CSV_BYTES // 1_000_000} MB.")
+
+    file = await document.get_file()
+    data = await file.download_as_bytearray()
+
+    if len(data) > MAX_CSV_BYTES:
+        raise ValueError("CSV is too large.")
+
+    return decode_csv_bytes(bytes(data))
+
+
+def load_csv_table(text: str) -> Tuple[List[str], List[Dict[str, str]]]:
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample)
+    except Exception:
+        dialect = csv.excel
+
+    reader = csv.DictReader(StringIO(text), dialect=dialect)
+
+    if not reader.fieldnames:
+        raise ValueError("CSV has no header row.")
+
+    headers = [header.strip() if header else "" for header in reader.fieldnames]
+    original_headers = reader.fieldnames
+
+    if len(headers) > MAX_CSV_COLUMNS:
+        raise ValueError(f"Too many columns. Maximum is {MAX_CSV_COLUMNS}.")
+
+    rows = []
+    for index, row in enumerate(reader, start=1):
+        if index > MAX_CSV_ROWS:
+            break
+        clean_row = {}
+        for original, clean in zip(original_headers, headers):
+            clean_row[clean] = row.get(original, "")
+        rows.append(clean_row)
+
+    if not rows:
+        raise ValueError("CSV has no data rows.")
+
+    return headers, rows
+
+
+def resolve_column_name(headers: List[str], requested: str) -> str:
+    requested = requested.strip()
+    if requested in headers:
+        return requested
+
+    requested_lower = requested.lower()
+    matches = [header for header in headers if header.lower() == requested_lower]
+    if matches:
+        return matches[0]
+
+    contains = [header for header in headers if requested_lower in header.lower()]
+    if len(contains) == 1:
+        return contains[0]
+
+    raise ValueError(f"Column not found: {requested}")
+
+
+def numeric_columns(headers: List[str], rows: List[Dict[str, str]], min_fraction: float = 0.75) -> Dict[str, List[float]]:
+    result = {}
+
+    for header in headers:
+        values = []
+        non_missing = 0
+
+        for row in rows:
+            raw = row.get(header, "")
+            if raw is not None and str(raw).strip() != "":
+                non_missing += 1
+            value = try_float(raw)
+            if value is not None:
+                values.append(value)
+
+        if non_missing > 0 and len(values) >= 3 and len(values) / non_missing >= min_fraction:
+            result[header] = values
+
+    return result
+
+
+def paired_numeric_values(rows: List[Dict[str, str]], column_a: str, column_b: str, max_rows: Optional[int] = None) -> List[Tuple[float, float]]:
+    points = []
+    for row in rows:
+        a = try_float(row.get(column_a, ""))
+        b = try_float(row.get(column_b, ""))
+        if a is not None and b is not None:
+            points.append((a, b))
+            if max_rows is not None and len(points) >= max_rows:
+                break
+    return points
+
+
+def paired_features_target(rows: List[Dict[str, str]], features: List[str], target: str) -> Tuple[List[List[float]], List[float]]:
+    x_rows = []
+    y_values = []
+
+    for row in rows:
+        x = []
+        valid = True
+        for feature in features:
+            value = try_float(row.get(feature, ""))
+            if value is None:
+                valid = False
+                break
+            x.append(value)
+
+        target_value = try_float(row.get(target, ""))
+        if target_value is None:
+            valid = False
+
+        if valid:
+            x_rows.append(x)
+            y_values.append(target_value)
+
+    return x_rows, y_values
+
+
+# ------------------------------------------------------------
+# Linear algebra helpers
+# ------------------------------------------------------------
+
+def solve_linear_system(matrix: List[List[float]], vector: List[float]) -> List[float]:
+    n = len(matrix)
+    if n == 0 or any(len(row) != n for row in matrix) or len(vector) != n:
+        raise ValueError("Invalid linear system dimensions.")
+
+    augmented = [row[:] + [value] for row, value in zip(matrix, vector)]
+
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda row: abs(augmented[row][col]))
+        if abs(augmented[pivot][col]) < 1e-12:
+            raise ValueError("System is singular or ill-conditioned.")
+
+        augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+        pivot_value = augmented[col][col]
+
+        for j in range(col, n + 1):
+            augmented[col][j] /= pivot_value
+
+        for row in range(n):
+            if row == col:
+                continue
+            factor = augmented[row][col]
+            if abs(factor) < 1e-18:
+                continue
+            for j in range(col, n + 1):
+                augmented[row][j] -= factor * augmented[col][j]
+
+    return [augmented[i][n] for i in range(n)]
+
+
+def normal_cdf(z: float) -> float:
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def rmse(actual: List[float], predicted: List[float]) -> float:
+    return math.sqrt(sum((a - p) ** 2 for a, p in zip(actual, predicted)) / len(actual))
+
+
+def mae(actual: List[float], predicted: List[float]) -> float:
+    return sum(abs(a - p) for a, p in zip(actual, predicted)) / len(actual)
+
+
+def r2_score(actual: List[float], predicted: List[float]) -> float:
+    avg = mean(actual)
+    ss_res = sum((a - p) ** 2 for a, p in zip(actual, predicted))
+    ss_tot = sum((a - avg) ** 2 for a in actual)
+    return 1 - ss_res / ss_tot if ss_tot != 0 else 1.0
+
+
+# ------------------------------------------------------------
+# Correlation matrix
+# ------------------------------------------------------------
+
+def build_correlation_matrix(headers: List[str], rows: List[Dict[str, str]], selected_columns: Optional[List[str]] = None) -> Tuple[List[str], List[List[Optional[float]]]]:
+    numeric = numeric_columns(headers, rows)
+
+    if selected_columns:
+        columns = [resolve_column_name(headers, col) for col in selected_columns]
+        missing_numeric = [col for col in columns if col not in numeric]
+        if missing_numeric:
+            raise ValueError("These columns are not numeric enough: " + ", ".join(missing_numeric))
+    else:
+        columns = list(numeric.keys())
+
+    if len(columns) < 2:
+        raise ValueError("At least 2 numeric columns are required.")
+
+    if len(columns) > MAX_ADVANCED_CSV_NUMERIC_COLUMNS:
+        columns = columns[:MAX_ADVANCED_CSV_NUMERIC_COLUMNS]
+
+    matrix: List[List[Optional[float]]] = []
+    for col_a in columns:
+        row_values: List[Optional[float]] = []
+        for col_b in columns:
+            if col_a == col_b:
+                row_values.append(1.0)
+                continue
+            points = paired_numeric_values(rows, col_a, col_b)
+            if len(points) < 3:
+                row_values.append(None)
+            else:
+                try:
+                    row_values.append(pearson_correlation(points))
+                except Exception:
+                    row_values.append(None)
+        matrix.append(row_values)
+
+    return columns, matrix
+
+
+def corr_color(value: Optional[float]) -> Tuple[int, int, int]:
+    if value is None:
+        return (230, 230, 230)
+
+    value = max(-1.0, min(1.0, value))
+    if value >= 0:
+        intensity = int(255 - 145 * value)
+        return (intensity, intensity, 255)
+
+    intensity = int(255 + 145 * value)
+    return (255, intensity, intensity)
+
+
+def create_correlation_matrix_image(columns: List[str], matrix: List[List[Optional[float]]]) -> BytesIO:
+    n = len(columns)
+    cell = 82 if n <= 8 else 68
+    width = max(900, 260 + n * cell)
+    height = max(760, 250 + n * cell)
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = load_font(30)
+    label_font = load_font(16)
+    value_font = load_font(17)
+
+    left, top = 190, 150
+    draw.text((45, 35), "Correlation matrix heatmap", fill="black", font=title_font)
+    draw.text((45, 78), "Pearson r. Blue = positive, red = negative.", fill="#444444", font=label_font)
+
+    for j, col in enumerate(columns):
+        draw.text((left + j * cell + 6, top - 38), col[:10], fill="black", font=label_font)
+
+    for i, col in enumerate(columns):
+        draw.text((left - 145, top + i * cell + 28), col[:16], fill="black", font=label_font)
+        for j, value in enumerate(matrix[i]):
+            x1 = left + j * cell
+            y1 = top + i * cell
+            x2 = x1 + cell
+            y2 = y1 + cell
+            draw.rectangle((x1, y1, x2, y2), fill=corr_color(value), outline="#333333")
+            label = "NA" if value is None else nice_number(value, 3)
+            draw.text((x1 + 13, y1 + 28), label, fill="black", font=value_font)
+
+    return image_to_buffer(image, "correlation_matrix.png")
+
+
+async def corr_matrix_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        csv_text = await download_csv_text(update)
+        headers, rows = load_csv_table(csv_text)
+        selected = [part.strip() for part in re.split(r"[,\s]+", " ".join(context.args).strip()) if part.strip()]
+        columns, matrix = build_correlation_matrix(headers, rows, selected if selected else None)
+        image = create_correlation_matrix_image(columns, matrix)
+    except Exception as error:
+        await update.message.reply_text(
+            "Correlation matrix error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "Reply to a CSV file with /corr_matrix\n"
+            "Optional: /corr_matrix column1 column2 column3"
+        )
+        return
+
+    await update.message.reply_photo(photo=InputFile(image, filename="correlation_matrix.png"), caption="CSV correlation matrix")
+
+
+# ------------------------------------------------------------
+# Pairplot
+# ------------------------------------------------------------
+
+def draw_small_scatter(draw: ImageDraw.ImageDraw, points: List[Tuple[float, float]], box: Tuple[int, int, int, int]) -> None:
+    x1, y1, x2, y2 = box
+    draw.rectangle(box, outline="#444444", fill="#fbfbfb")
+    if not points:
+        return
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    xmin, xmax = padded_range(xs)
+    ymin, ymax = padded_range(ys)
+
+    for x, y in points:
+        px = int(x1 + 8 + (x - xmin) / (xmax - xmin) * max(1, (x2 - x1 - 16)))
+        py = int(y2 - 8 - (y - ymin) / (ymax - ymin) * max(1, (y2 - y1 - 16)))
+        draw.ellipse((px - 3, py - 3, px + 3, py + 3), fill="#1f77b4")
+
+
+def create_pairplot_image(columns: List[str], rows: List[Dict[str, str]]) -> BytesIO:
+    n = len(columns)
+    cell = 245
+    margin_left = 120
+    margin_top = 110
+    width = margin_left + n * cell + 70
+    height = margin_top + n * cell + 70
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = load_font(30)
+    label_font = load_font(18)
+    small_font = load_font(16)
+
+    draw.text((45, 35), "Pairplot scatter matrix", fill="black", font=title_font)
+
+    for i, y_col in enumerate(columns):
+        draw.text((25, margin_top + i * cell + 100), y_col[:12], fill="black", font=label_font)
+        for j, x_col in enumerate(columns):
+            box = (
+                margin_left + j * cell,
+                margin_top + i * cell,
+                margin_left + (j + 1) * cell - 15,
+                margin_top + (i + 1) * cell - 15,
+            )
+            if i == j:
+                draw.rectangle(box, outline="#444444", fill="#f4f4f4")
+                draw.text((box[0] + 30, box[1] + 95), x_col[:16], fill="black", font=label_font)
+            else:
+                points = paired_numeric_values(rows, x_col, y_col, max_rows=MAX_PAIRPLOT_ROWS)
+                draw_small_scatter(draw, points, box)
+
+            if i == 0:
+                draw.text((box[0] + 12, margin_top - 30), x_col[:12], fill="black", font=small_font)
+
+    return image_to_buffer(image, "pairplot.png")
+
+
+async def pairplot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        csv_text = await download_csv_text(update)
+        headers, rows = load_csv_table(csv_text)
+        numeric = numeric_columns(headers, rows)
+        requested = [part.strip() for part in re.split(r"[,\s]+", " ".join(context.args).strip()) if part.strip()]
+
+        if requested:
+            columns = [resolve_column_name(headers, col) for col in requested]
+            missing_numeric = [col for col in columns if col not in numeric]
+            if missing_numeric:
+                raise ValueError("These columns are not numeric enough: " + ", ".join(missing_numeric))
+        else:
+            columns = list(numeric.keys())[:MAX_PAIRPLOT_COLUMNS]
+
+        if len(columns) < 2:
+            raise ValueError("At least 2 numeric columns are required.")
+        if len(columns) > MAX_PAIRPLOT_COLUMNS:
+            raise ValueError(f"Pairplot supports maximum {MAX_PAIRPLOT_COLUMNS} columns.")
+
+        image = create_pairplot_image(columns, rows)
+    except Exception as error:
+        await update.message.reply_text(
+            "Pairplot error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "Reply to a CSV with /pairplot\n"
+            "or /pairplot column1 column2 column3"
+        )
+        return
+
+    await update.message.reply_photo(photo=InputFile(image, filename="pairplot.png"), caption="CSV pairplot")
+
+
+# ------------------------------------------------------------
+# Polynomial regression
+# ------------------------------------------------------------
+
+def parse_degree_points_input(text: str, default_degree: int = 2) -> Tuple[int, str]:
+    degree = default_degree
+    data_text = text.strip()
+
+    if "|" in data_text:
+        left, right = data_text.split("|", 1)
+        match = re.search(r"degree\s*(?:=)?\s*(\d+)", left, flags=re.IGNORECASE)
+        if match:
+            degree = int(match.group(1))
+        else:
+            nums = re.findall(r"\d+", left)
+            if nums:
+                degree = int(nums[0])
+        data_text = right.strip()
+    else:
+        match = re.search(r"degree\s*(?:=)?\s*(\d+)", data_text, flags=re.IGNORECASE)
+        if match:
+            degree = int(match.group(1))
+            data_text = data_text[:match.start()] + " " + data_text[match.end():]
+
+    if degree < 1 or degree > MAX_POLY_DEGREE:
+        raise ValueError(f"Degree must be between 1 and {MAX_POLY_DEGREE}.")
+
+    return degree, data_text
+
+
+def fit_polynomial_regression(points: List[Tuple[float, float]], degree: int) -> Dict:
+    if len(points) <= degree:
+        raise ValueError("Number of points must be greater than the polynomial degree.")
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    size = degree + 1
+
+    matrix = []
+    vector = []
+    for row_power in range(size):
+        matrix_row = []
+        for col_power in range(size):
+            matrix_row.append(sum(x ** (row_power + col_power) for x in xs))
+        matrix.append(matrix_row)
+        vector.append(sum(y * (x ** row_power) for x, y in points))
+
+    coeffs = solve_linear_system(matrix, vector)
+    predicted = [sum(coeffs[p] * (x ** p) for p in range(size)) for x in xs]
+
+    return {
+        "degree": degree,
+        "coeffs": coeffs,
+        "r2": r2_score(ys, predicted),
+        "rmse": rmse(ys, predicted),
+        "predicted": predicted,
+    }
+
+
+def polynomial_to_text(coeffs: List[float]) -> str:
+    terms = []
+    for power, coeff in enumerate(coeffs):
+        if abs(coeff) < 1e-10:
+            continue
+        sign = "+" if coeff >= 0 else "-"
+        value = abs(coeff)
+        if power == 0:
+            term = nice_number(value)
+        elif power == 1:
+            term = f"{nice_number(value)}x"
+        else:
+            term = f"{nice_number(value)}x^{power}"
+        terms.append((sign, term))
+
+    if not terms:
+        return "y = 0"
+
+    first_sign, first_term = terms[0]
+    expression = ("-" if first_sign == "-" else "") + first_term
+    for sign, term in terms[1:]:
+        expression += f" {sign} {term}"
+    return "y = " + expression
+
+
+def create_polynomial_regression_image(points: List[Tuple[float, float]], result: Dict) -> BytesIO:
+    width, height = 1200, 780
+    left, top, right, bottom = 95, 95, 1140, 660
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    xmin, xmax = padded_range(xs)
+
+    curve = []
+    for i in range(300):
+        x = xmin + i * (xmax - xmin) / 299
+        y = sum(result["coeffs"][p] * (x ** p) for p in range(len(result["coeffs"])))
+        curve.append((x, y))
+
+    ymin, ymax = padded_range(ys + [p[1] for p in curve])
+    mapper = PlotMapper(left, top, right, bottom, xmin, xmax, ymin, ymax)
+    draw_plot_frame(draw, mapper, f"Polynomial regression degree {result['degree']}")
+
+    for x, y in points:
+        px, py = mapper.x(x), mapper.y(y)
+        draw.ellipse((px - 6, py - 6, px + 6, py + 6), fill="#1f77b4", outline="#0d3d66")
+
+    curve_pixels = [(mapper.x(x), mapper.y(y)) for x, y in curve if math.isfinite(y)]
+    if len(curve_pixels) >= 2:
+        draw.line(curve_pixels, fill="#d62728", width=4)
+
+    draw.text((left, height - 70), f"{polynomial_to_text(result['coeffs'])} | R²={nice_number(result['r2'])}", fill="#333333", font=load_font(18))
+    return image_to_buffer(image, "polynomial_regression.png")
+
+
+async def poly_regression_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        degree, data_text = parse_degree_points_input(" ".join(context.args))
+        points = parse_points(data_text, max_points=MAX_REGRESSION_POINTS)
+        result = fit_polynomial_regression(points, degree)
+        image = create_polynomial_regression_image(points, result)
+    except Exception as error:
+        await update.message.reply_text(
+            "Polynomial regression error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/poly_regression degree 2 | 1,2; 2,5; 3,10; 4,17; 5,26"
+        )
+        return
+
+    report = (
+        "Polynomial regression 📈\n\n"
+        f"{polynomial_to_text(result['coeffs'])}\n"
+        f"Degree: {result['degree']}\n"
+        f"R²: {nice_number(result['r2'])}\n"
+        f"RMSE: {nice_number(result['rmse'])}"
+    )
+    await update.message.reply_text(report)
+    await update.message.reply_photo(photo=InputFile(image, filename="polynomial_regression.png"), caption="Polynomial regression plot")
+
+
+# ------------------------------------------------------------
+# Multiple linear regression
+# ------------------------------------------------------------
+
+def parse_multiple_regression_args(text: str) -> Tuple[str, List[str]]:
+    target_match = re.search(r"target\s*=\s*([^|\n]+?)(?=\s+features\s*=|$)", text, flags=re.IGNORECASE)
+    features_match = re.search(r"features\s*=\s*([^|\n]+)$", text, flags=re.IGNORECASE)
+
+    if not target_match or not features_match:
+        raise ValueError("Use: /multiple_regression target=target_column features=feature1,feature2")
+
+    target = target_match.group(1).strip().strip(",")
+    features = [feature.strip() for feature in features_match.group(1).split(",") if feature.strip()]
+
+    if not target:
+        raise ValueError("Target column is missing.")
+    if not features:
+        raise ValueError("At least one feature column is required.")
+    if len(features) > MAX_MULTI_FEATURES:
+        raise ValueError(f"Maximum features: {MAX_MULTI_FEATURES}.")
+
+    return target, features
+
+
+def fit_multiple_regression(x_rows: List[List[float]], y_values: List[float]) -> Dict:
+    if len(x_rows) < 3:
+        raise ValueError("At least 3 complete numeric rows are required.")
+
+    p = len(x_rows[0]) + 1
+    if len(x_rows) <= p:
+        raise ValueError("More rows than coefficients are required.")
+
+    design = [[1.0] + row[:] for row in x_rows]
+    matrix = [[0.0 for _ in range(p)] for _ in range(p)]
+    vector = [0.0 for _ in range(p)]
+
+    for row, y in zip(design, y_values):
+        for i in range(p):
+            vector[i] += row[i] * y
+            for j in range(p):
+                matrix[i][j] += row[i] * row[j]
+
+    coeffs = solve_linear_system(matrix, vector)
+    predicted = [sum(c * value for c, value in zip(coeffs, row)) for row in design]
+
+    return {
+        "coeffs": coeffs,
+        "predicted": predicted,
+        "r2": r2_score(y_values, predicted),
+        "rmse": rmse(y_values, predicted),
+        "mae": mae(y_values, predicted),
+        "rows": len(y_values),
+    }
+
+
+def create_predicted_actual_image(actual: List[float], predicted: List[float], title: str) -> BytesIO:
+    points = list(zip(actual, predicted))
+    width, height = 1200, 780
+    left, top, right, bottom = 95, 95, 1140, 660
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    all_values = actual + predicted
+    xmin, xmax = padded_range(all_values)
+    ymin, ymax = xmin, xmax
+    mapper = PlotMapper(left, top, right, bottom, xmin, xmax, ymin, ymax)
+    draw_plot_frame(draw, mapper, title, "actual", "predicted")
+
+    draw.line((mapper.x(xmin), mapper.y(xmin), mapper.x(xmax), mapper.y(xmax)), fill="#d62728", width=3)
+    for x, y in points[:1000]:
+        px, py = mapper.x(x), mapper.y(y)
+        draw.ellipse((px - 5, py - 5, px + 5, py + 5), fill="#1f77b4", outline="#0d3d66")
+
+    return image_to_buffer(image, "predicted_vs_actual.png")
+
+
+async def multiple_regression_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        args_text = " ".join(context.args)
+        csv_text = await download_csv_text(update)
+        headers, rows = load_csv_table(csv_text)
+        target_raw, features_raw = parse_multiple_regression_args(args_text)
+        target = resolve_column_name(headers, target_raw)
+        features = [resolve_column_name(headers, feature) for feature in features_raw]
+        x_rows, y_values = paired_features_target(rows, features, target)
+        result = fit_multiple_regression(x_rows, y_values)
+        image = create_predicted_actual_image(y_values, result["predicted"], "Multiple regression: predicted vs actual")
+    except Exception as error:
+        await update.message.reply_text(
+            "Multiple regression error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "Reply to a CSV with:\n"
+            "/multiple_regression target=price features=size,rooms,age"
+        )
+        return
+
+    lines = [
+        "Multiple linear regression 📈",
+        "",
+        f"Target: {target}",
+        f"Rows used: {result['rows']}",
+        f"R²: {nice_number(result['r2'])}",
+        f"RMSE: {nice_number(result['rmse'])}",
+        f"MAE: {nice_number(result['mae'])}",
+        "",
+        "Coefficients:",
+        f"Intercept: {nice_number(result['coeffs'][0])}",
+    ]
+    for feature, coeff in zip(features, result["coeffs"][1:]):
+        lines.append(f"{feature}: {nice_number(coeff)}")
+
+    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_photo(photo=InputFile(image, filename="multiple_regression.png"), caption="Predicted vs actual")
+
+
+# ------------------------------------------------------------
+# Logistic regression
+# ------------------------------------------------------------
+
+def sigmoid(value: float) -> float:
+    if value >= 0:
+        z = math.exp(-value)
+        return 1 / (1 + z)
+    z = math.exp(value)
+    return z / (1 + z)
+
+
+def fit_logistic_regression(points: List[Tuple[float, float]]) -> Dict:
+    if len(points) < 4:
+        raise ValueError("At least 4 points are required.")
+
+    xs = [p[0] for p in points]
+    ys = [int(p[1]) for p in points]
+
+    if any(y not in (0, 1) for y in ys):
+        raise ValueError("Labels must be 0 or 1.")
+
+    x_mean = mean(xs)
+    x_std = math.sqrt(population_variance(xs))
+    if x_std == 0:
+        raise ValueError("x must have non-zero variance.")
+
+    zs = [(x - x_mean) / x_std for x in xs]
+    w = 0.0
+    b = 0.0
+    learning_rate = 0.15
+
+    for _ in range(MAX_LOGISTIC_ITERATIONS):
+        grad_w = 0.0
+        grad_b = 0.0
+        for z, y in zip(zs, ys):
+            p = sigmoid(w * z + b)
+            grad_w += (p - y) * z
+            grad_b += (p - y)
+        w -= learning_rate * grad_w / len(zs)
+        b -= learning_rate * grad_b / len(zs)
+
+    probabilities = [sigmoid(w * z + b) for z in zs]
+    predictions = [1 if p >= 0.5 else 0 for p in probabilities]
+    accuracy = sum(1 for y, pred in zip(ys, predictions) if y == pred) / len(ys)
+
+    return {
+        "w": w,
+        "b": b,
+        "x_mean": x_mean,
+        "x_std": x_std,
+        "probabilities": probabilities,
+        "predictions": predictions,
+        "accuracy": accuracy,
+    }
+
+
+def create_logistic_regression_image(points: List[Tuple[float, float]], result: Dict) -> BytesIO:
+    width, height = 1200, 780
+    left, top, right, bottom = 95, 95, 1140, 660
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    xs = [p[0] for p in points]
+    xmin, xmax = padded_range(xs)
+    mapper = PlotMapper(left, top, right, bottom, xmin, xmax, -0.08, 1.08)
+    draw_plot_frame(draw, mapper, "Logistic regression", "x", "P(y=1)")
+
+    for x, y in points:
+        px, py = mapper.x(x), mapper.y(y)
+        color = "#2ca02c" if int(y) == 1 else "#d62728"
+        draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill=color, outline="#333333")
+
+    curve = []
+    for i in range(300):
+        x = xmin + i * (xmax - xmin) / 299
+        z = (x - result["x_mean"]) / result["x_std"]
+        y = sigmoid(result["w"] * z + result["b"])
+        curve.append((mapper.x(x), mapper.y(y)))
+    draw.line(curve, fill="#1f77b4", width=4)
+    draw.line((mapper.x(xmin), mapper.y(0.5), mapper.x(xmax), mapper.y(0.5)), fill="#888888", width=2)
+
+    draw.text((left, height - 70), f"accuracy={nice_number(result['accuracy'])} | z=(x-{nice_number(result['x_mean'])})/{nice_number(result['x_std'])}", fill="#333333", font=load_font(18))
+    return image_to_buffer(image, "logistic_regression.png")
+
+
+async def logistic_regression_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        points = parse_points(" ".join(context.args), max_points=MAX_REGRESSION_POINTS)
+        result = fit_logistic_regression(points)
+        image = create_logistic_regression_image(points, result)
+    except Exception as error:
+        await update.message.reply_text(
+            "Logistic regression error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/logistic_regression 1,0; 2,0; 3,0; 4,1; 5,1; 6,1"
+        )
+        return
+
+    report = (
+        "Logistic regression 🤖\n\n"
+        f"Model: P(y=1) = sigmoid({nice_number(result['w'])}z + {nice_number(result['b'])})\n"
+        f"z = (x - {nice_number(result['x_mean'])}) / {nice_number(result['x_std'])}\n"
+        f"Accuracy at threshold 0.5: {nice_number(result['accuracy'])}"
+    )
+    await update.message.reply_text(report)
+    await update.message.reply_photo(photo=InputFile(image, filename="logistic_regression.png"), caption="Logistic regression plot")
+
+
+# ------------------------------------------------------------
+# PCA
+# ------------------------------------------------------------
+
+def run_pca_2d(points: List[Tuple[float, float]]) -> Dict:
+    if len(points) < 2:
+        raise ValueError("At least 2 points are required.")
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    mx = mean(xs)
+    my = mean(ys)
+    centered = [(x - mx, y - my) for x, y in points]
+
+    a = sum(x * x for x, _ in centered) / len(points)
+    b = sum(x * y for x, y in centered) / len(points)
+    c = sum(y * y for _, y in centered) / len(points)
+
+    term = math.sqrt((a - c) ** 2 + 4 * b * b)
+    lambda1 = (a + c + term) / 2
+    lambda2 = (a + c - term) / 2
+
+    if abs(b) > 1e-12:
+        vx, vy = b, lambda1 - a
+    elif a >= c:
+        vx, vy = 1.0, 0.0
+    else:
+        vx, vy = 0.0, 1.0
+
+    norm = math.sqrt(vx * vx + vy * vy)
+    vx, vy = vx / norm, vy / norm
+    explained = lambda1 / (lambda1 + lambda2) if lambda1 + lambda2 > 0 else 1.0
+    scores = [x * vx + y * vy for x, y in centered]
+
+    return {
+        "mean": (mx, my),
+        "pc1": (vx, vy),
+        "eigenvalues": (lambda1, lambda2),
+        "explained": explained,
+        "scores": scores,
+    }
+
+
+def create_pca_image(points: List[Tuple[float, float]], result: Dict) -> BytesIO:
+    width, height = 1200, 780
+    left, top, right, bottom = 95, 95, 1140, 660
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    mx, my = result["mean"]
+    vx, vy = result["pc1"]
+    scale = max(max(abs(score) for score in result["scores"]), 1.0)
+    line_points = [(mx - vx * scale, my - vy * scale), (mx + vx * scale, my + vy * scale)]
+    xmin, xmax = padded_range(xs + [p[0] for p in line_points])
+    ymin, ymax = padded_range(ys + [p[1] for p in line_points])
+    mapper = PlotMapper(left, top, right, bottom, xmin, xmax, ymin, ymax)
+    draw_plot_frame(draw, mapper, "PCA first principal component")
+
+    for x, y in points:
+        px, py = mapper.x(x), mapper.y(y)
+        draw.ellipse((px - 6, py - 6, px + 6, py + 6), fill="#1f77b4", outline="#0d3d66")
+
+    draw.line((mapper.x(line_points[0][0]), mapper.y(line_points[0][1]), mapper.x(line_points[1][0]), mapper.y(line_points[1][1])), fill="#d62728", width=4)
+    draw.ellipse((mapper.x(mx) - 8, mapper.y(my) - 8, mapper.x(mx) + 8, mapper.y(my) + 8), fill="#ff7f0e", outline="#333333")
+    draw.text((left, height - 70), f"PC1=({nice_number(vx)}, {nice_number(vy)}) | explained variance={nice_number(result['explained'])}", fill="#333333", font=load_font(18))
+    return image_to_buffer(image, "pca.png")
+
+
+async def pca_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        points = parse_points(" ".join(context.args), max_points=MAX_REGRESSION_POINTS)
+        result = run_pca_2d(points)
+        image = create_pca_image(points, result)
+    except Exception as error:
+        await update.message.reply_text(
+            "PCA error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/pca 1,2; 2,3; 3,5; 4,6; 5,8"
+        )
+        return
+
+    await update.message.reply_text(
+        "Principal component analysis 🧭\n\n"
+        f"Mean point: ({nice_number(result['mean'][0])}, {nice_number(result['mean'][1])})\n"
+        f"PC1 direction: ({nice_number(result['pc1'][0])}, {nice_number(result['pc1'][1])})\n"
+        f"Eigenvalues: {nice_number(result['eigenvalues'][0])}, {nice_number(result['eigenvalues'][1])}\n"
+        f"Explained variance by PC1: {nice_number(result['explained'])}"
+    )
+    await update.message.reply_photo(photo=InputFile(image, filename="pca.png"), caption="PCA plot")
+
+
+# ------------------------------------------------------------
+# K-means auto / elbow
+# ------------------------------------------------------------
+
+def parse_kmeans_auto_input(text: str) -> Tuple[int, List[Tuple[float, float]]]:
+    if "|" not in text:
+        raise ValueError("Use: /kmeans_auto maxk 6 | x,y; x,y; ...")
+
+    left, right = text.split("|", 1)
+    match = re.search(r"maxk\s*(?:=)?\s*(\d+)", left, flags=re.IGNORECASE)
+    if match:
+        max_k = int(match.group(1))
+    else:
+        nums = re.findall(r"\d+", left)
+        max_k = int(nums[0]) if nums else 6
+
+    if max_k < 2 or max_k > MAX_KMEANS_K:
+        raise ValueError(f"maxk must be between 2 and {MAX_KMEANS_K}.")
+
+    points = parse_points(right, max_points=MAX_KMEANS_POINTS)
+    max_k = min(max_k, len(points))
+    return max_k, points
+
+
+def create_elbow_image(inertias: List[Tuple[int, float]]) -> BytesIO:
+    width, height = 1100, 720
+    left, top, right, bottom = 90, 95, 1040, 600
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    ks = [k for k, _ in inertias]
+    vals = [v for _, v in inertias]
+    ymin, ymax = padded_range(vals, include_zero=True)
+    mapper = PlotMapper(left, top, right, bottom, min(ks), max(ks), ymin, ymax)
+    draw_plot_frame(draw, mapper, "K-means elbow curve", "k", "inertia")
+
+    pixels = [(mapper.x(k), mapper.y(v)) for k, v in inertias]
+    if len(pixels) >= 2:
+        draw.line(pixels, fill="#1f77b4", width=4)
+    for k, v in inertias:
+        px, py = mapper.x(k), mapper.y(v)
+        draw.ellipse((px - 7, py - 7, px + 7, py + 7), fill="#ff7f0e", outline="#333333")
+        draw.text((px + 8, py - 10), str(k), fill="black", font=load_font(16))
+
+    return image_to_buffer(image, "kmeans_elbow.png")
+
+
+def recommend_k_from_inertias(inertias: List[Tuple[int, float]]) -> int:
+    if len(inertias) <= 2:
+        return inertias[-1][0]
+
+    best_k = inertias[1][0]
+    best_score = -float("inf")
+    values = [v for _, v in inertias]
+    for i in range(1, len(values) - 1):
+        previous_drop = values[i - 1] - values[i]
+        next_drop = values[i] - values[i + 1]
+        score = previous_drop - next_drop
+        if score > best_score:
+            best_score = score
+            best_k = inertias[i][0]
+    return best_k
+
+
+async def kmeans_auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        max_k, points = parse_kmeans_auto_input(" ".join(context.args))
+        inertias = []
+        for k in range(1, max_k + 1):
+            result = run_kmeans(points, k)
+            inertias.append((k, result["inertia"]))
+        recommended = recommend_k_from_inertias(inertias)
+        image = create_elbow_image(inertias)
+    except Exception as error:
+        await update.message.reply_text(
+            "K-means auto error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/kmeans_auto maxk 6 | 1,1; 1,2; 8,8; 9,8; 20,20; 21,20"
+        )
+        return
+
+    lines = ["K-means elbow analysis 🤖", "", f"Suggested k: {recommended}", "", "Inertia by k:"]
+    for k, inertia in inertias:
+        lines.append(f"k={k}: {nice_number(inertia)}")
+
+    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_photo(photo=InputFile(image, filename="kmeans_elbow.png"), caption="K-means elbow curve")
+
+
+# ------------------------------------------------------------
+# Moving average and forecast
+# ------------------------------------------------------------
+
+def parse_window_values_input(text: str, default_window: int = 3) -> Tuple[int, List[float]]:
+    window = default_window
+    data_text = text.strip()
+
+    if "|" in data_text:
+        left, right = data_text.split("|", 1)
+        match = re.search(r"window\s*(?:=)?\s*(\d+)", left, flags=re.IGNORECASE)
+        if match:
+            window = int(match.group(1))
+        else:
+            nums = re.findall(r"\d+", left)
+            if nums:
+                window = int(nums[0])
+        data_text = right.strip()
+
+    values = parse_numbers_from_text(data_text, max_count=MAX_NUMBERS)
+    if window < 1 or window > len(values):
+        raise ValueError("Window must be between 1 and the number of values.")
+
+    return window, values
+
+
+def moving_average(values: List[float], window: int) -> List[float]:
+    result = []
+    for i in range(len(values)):
+        start = max(0, i - window + 1)
+        result.append(mean(values[start:i + 1]))
+    return result
+
+
+def create_line_series_image(series: List[Tuple[str, List[float]]], title: str, filename: str) -> BytesIO:
+    width, height = 1200, 780
+    left, top, right, bottom = 95, 95, 1140, 660
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+
+    all_values = []
+    max_len = 0
+    for _, values in series:
+        all_values.extend(values)
+        max_len = max(max_len, len(values))
+
+    mapper = PlotMapper(left, top, right, bottom, 1, max(2, max_len), *padded_range(all_values))
+    draw_plot_frame(draw, mapper, title, "index", "value")
+
+    colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e"]
+    for idx, (name, values) in enumerate(series):
+        pixels = [(mapper.x(i + 1), mapper.y(value)) for i, value in enumerate(values)]
+        if len(pixels) >= 2:
+            draw.line(pixels, fill=colors[idx % len(colors)], width=4)
+        for px, py in pixels:
+            draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=colors[idx % len(colors)])
+        draw.text((left + idx * 220, height - 68), name, fill=colors[idx % len(colors)], font=load_font(20))
+
+    return image_to_buffer(image, filename)
+
+
+async def moving_average_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        window, values = parse_window_values_input(" ".join(context.args))
+        ma_values = moving_average(values, window)
+        image = create_line_series_image([("Original", values), (f"MA window={window}", ma_values)], "Moving average", "moving_average.png")
+    except Exception as error:
+        await update.message.reply_text(
+            "Moving average error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/moving_average window 3 | 10,12,13,15,14,18,20"
+        )
+        return
+
+    preview = ", ".join(nice_number(v) for v in ma_values[:20])
+    if len(ma_values) > 20:
+        preview += ", ..."
+    await update.message.reply_text(f"Moving average 📉\n\nWindow: {window}\nValues: {preview}")
+    await update.message.reply_photo(photo=InputFile(image, filename="moving_average.png"), caption="Moving average plot")
+
+
+def parse_forecast_input(text: str) -> Tuple[int, List[float]]:
+    steps = 5
+    data_text = text.strip()
+
+    if "|" in data_text:
+        left, right = data_text.split("|", 1)
+        match = re.search(r"steps\s*(?:=)?\s*(\d+)", left, flags=re.IGNORECASE)
+        if match:
+            steps = int(match.group(1))
+        else:
+            nums = re.findall(r"\d+", left)
+            if nums:
+                steps = int(nums[0])
+        data_text = right.strip()
+
+    if steps < 1 or steps > MAX_FORECAST_STEPS:
+        raise ValueError(f"Steps must be between 1 and {MAX_FORECAST_STEPS}.")
+
+    values = parse_numbers_from_text(data_text, max_count=MAX_NUMBERS)
+    if len(values) < 2:
+        raise ValueError("At least 2 values are required.")
+
+    return steps, values
+
+
+async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        steps, values = parse_forecast_input(" ".join(context.args))
+        points = [(i + 1, value) for i, value in enumerate(values)]
+        reg = linear_regression(points)
+        forecast_values = [reg["slope"] * (len(values) + i + 1) + reg["intercept"] for i in range(steps)]
+        combined_forecast = values + forecast_values
+        image = create_line_series_image([("Actual", values), ("Trend + forecast", combined_forecast)], "Simple linear forecast", "forecast.png")
+    except Exception as error:
+        await update.message.reply_text(
+            "Forecast error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/forecast steps 5 | 10,12,13,15,18,21"
+        )
+        return
+
+    await update.message.reply_text(
+        "Simple trend forecast 🔮\n\n"
+        f"Model: y = {nice_number(reg['slope'])}t + {nice_number(reg['intercept'])}\n"
+        f"R² on history: {nice_number(reg['r2'])}\n"
+        f"Next {steps}: " + ", ".join(nice_number(v) for v in forecast_values)
+    )
+    await update.message.reply_photo(photo=InputFile(image, filename="forecast.png"), caption="Forecast plot")
+
+
+# ------------------------------------------------------------
+# Hypothesis tests
+# ------------------------------------------------------------
+
+def student_t_pdf(x: float, df: int) -> float:
+    return math.exp(
+        math.lgamma((df + 1) / 2) - math.lgamma(df / 2)
+        - 0.5 * math.log(df * math.pi)
+        - ((df + 1) / 2) * math.log(1 + (x * x) / df)
+    )
+
+
+def student_t_two_tailed_p(t_value: float, df: int) -> float:
+    t_abs = abs(t_value)
+    if df <= 0:
+        return float("nan")
+    if t_abs > 40:
+        return 0.0
+
+    intervals = 1000
+    if intervals % 2 == 1:
+        intervals += 1
+    h = t_abs / intervals if intervals else 0
+    area = student_t_pdf(0.0, df) + student_t_pdf(t_abs, df)
+    for i in range(1, intervals):
+        x = i * h
+        area += (4 if i % 2 else 2) * student_t_pdf(x, df)
+    integral = area * h / 3
+    cdf = 0.5 + integral
+    return max(0.0, min(1.0, 2 * (1 - cdf)))
+
+
+def parse_ttest_input(text: str) -> Dict:
+    if "|" not in text:
+        raise ValueError("Use | before the data values.")
+
+    left, right = text.split("|", 1)
+    left_lower = left.lower()
+
+    if "two_sample" in left_lower or "two-sample" in left_lower or "welch" in left_lower:
+        groups = [part.strip() for part in right.split(";", 1)]
+        if len(groups) != 2:
+            raise ValueError("Two-sample t-test needs two groups separated by ;")
+        values_a = parse_numbers_from_text(groups[0], max_count=MAX_TTEST_VALUES)
+        values_b = parse_numbers_from_text(groups[1], max_count=MAX_TTEST_VALUES)
+        return {"kind": "two_sample", "a": values_a, "b": values_b}
+
+    mean_match = re.search(r"mean\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)", left, flags=re.IGNORECASE)
+    if not mean_match:
+        if "mean" in left_lower:
+            nums = parse_numbers_from_text(left, max_count=1)
+            test_mean = nums[0]
+        else:
+            raise ValueError("One-sample t-test needs mean=VALUE.")
+    else:
+        test_mean = float(mean_match.group(1))
+
+    values = parse_numbers_from_text(right, max_count=MAX_TTEST_VALUES)
+    return {"kind": "one_sample", "mean": test_mean, "values": values}
+
+
+def one_sample_ttest(values: List[float], test_mean: float) -> Dict:
+    if len(values) < 2:
+        raise ValueError("At least 2 values are required.")
+    avg = mean(values)
+    sd = math.sqrt(sample_variance(values))
+    if sd == 0:
+        raise ValueError("Sample standard deviation is zero.")
+    t_value = (avg - test_mean) / (sd / math.sqrt(len(values)))
+    df = len(values) - 1
+    return {"mean": avg, "sd": sd, "t": t_value, "df": df, "p": student_t_two_tailed_p(t_value, df)}
+
+
+def two_sample_welch_ttest(a: List[float], b: List[float]) -> Dict:
+    if len(a) < 2 or len(b) < 2:
+        raise ValueError("Each group needs at least 2 values.")
+    ma, mb = mean(a), mean(b)
+    va, vb = sample_variance(a), sample_variance(b)
+    se2 = va / len(a) + vb / len(b)
+    if se2 <= 0:
+        raise ValueError("Standard error is zero.")
+    t_value = (ma - mb) / math.sqrt(se2)
+    df_num = se2 ** 2
+    df_den = ((va / len(a)) ** 2) / (len(a) - 1) + ((vb / len(b)) ** 2) / (len(b) - 1)
+    df = max(1, int(round(df_num / df_den))) if df_den > 0 else min(len(a), len(b)) - 1
+    return {"mean_a": ma, "mean_b": mb, "t": t_value, "df": df, "p": student_t_two_tailed_p(t_value, df)}
+
+
+async def ttest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        parsed = parse_ttest_input(" ".join(context.args))
+        if parsed["kind"] == "one_sample":
+            result = one_sample_ttest(parsed["values"], parsed["mean"])
+            report = (
+                "One-sample t-test 🧪\n\n"
+                f"Hypothesized mean: {nice_number(parsed['mean'])}\n"
+                f"Sample mean: {nice_number(result['mean'])}\n"
+                f"Sample std dev: {nice_number(result['sd'])}\n"
+                f"t: {nice_number(result['t'])}\n"
+                f"df: {result['df']}\n"
+                f"Approx. two-tailed p-value: {nice_number(result['p'])}"
+            )
+        else:
+            result = two_sample_welch_ttest(parsed["a"], parsed["b"])
+            report = (
+                "Welch two-sample t-test 🧪\n\n"
+                f"Group A mean: {nice_number(result['mean_a'])}\n"
+                f"Group B mean: {nice_number(result['mean_b'])}\n"
+                f"Difference: {nice_number(result['mean_a'] - result['mean_b'])}\n"
+                f"t: {nice_number(result['t'])}\n"
+                f"df: {result['df']}\n"
+                f"Approx. two-tailed p-value: {nice_number(result['p'])}"
+            )
+    except Exception as error:
+        await update.message.reply_text(
+            "t-test error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/ttest one_sample mean=10 | 9,10,11,12,8,10\n"
+            "/ttest two_sample | 9,10,11,12 ; 14,15,13,16"
+        )
+        return
+
+    await update.message.reply_text(report)
+
+
+def chi_square_survival_approx(chi2: float, df: int) -> float:
+    if df <= 0:
+        return float("nan")
+    if chi2 <= 0:
+        return 1.0
+    z = ((chi2 / df) ** (1 / 3) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
+    return max(0.0, min(1.0, 1 - normal_cdf(z)))
+
+
+def parse_chisquare_input(text: str) -> Tuple[List[float], Optional[List[float]]]:
+    lower = text.lower()
+    if "expected" in lower:
+        parts = re.split(r"expected", text, maxsplit=1, flags=re.IGNORECASE)
+        observed_text = re.sub(r"observed", "", parts[0], flags=re.IGNORECASE)
+        expected_text = parts[1]
+        observed = parse_numbers_from_text(observed_text, max_count=MAX_CHISQUARE_CATEGORIES)
+        expected = parse_numbers_from_text(expected_text, max_count=MAX_CHISQUARE_CATEGORIES)
+    else:
+        observed_text = re.sub(r"observed", "", text, flags=re.IGNORECASE)
+        observed = parse_numbers_from_text(observed_text, max_count=MAX_CHISQUARE_CATEGORIES)
+        expected = None
+
+    if len(observed) < 2:
+        raise ValueError("At least 2 categories are required.")
+    if any(value < 0 for value in observed):
+        raise ValueError("Observed counts must be non-negative.")
+
+    if expected is not None:
+        if len(expected) != len(observed):
+            raise ValueError("Observed and expected lists must have the same length.")
+        if any(value <= 0 for value in expected):
+            raise ValueError("Expected counts must be positive.")
+    else:
+        avg = sum(observed) / len(observed)
+        expected = [avg for _ in observed]
+
+    return observed, expected
+
+
+async def chisquare_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        observed, expected = parse_chisquare_input(" ".join(context.args))
+        chi2 = sum((o - e) ** 2 / e for o, e in zip(observed, expected))
+        df = len(observed) - 1
+        p = chi_square_survival_approx(chi2, df)
+    except Exception as error:
+        await update.message.reply_text(
+            "Chi-square error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage:\n"
+            "/chisquare 20,30,25,25\n"
+            "/chisquare observed 18,22,30 expected 20,20,30"
+        )
+        return
+
+    rows_text = "\n".join(
+        f"Category {i + 1}: observed={nice_number(o)}, expected={nice_number(e)}"
+        for i, (o, e) in enumerate(zip(observed, expected))
+    )
+    await update.message.reply_text(
+        "Chi-square goodness-of-fit test 🧪\n\n"
+        f"χ²: {nice_number(chi2)}\n"
+        f"df: {df}\n"
+        f"Approx. p-value: {nice_number(p)}\n\n"
+        f"{rows_text}"
+    )
+
+
+# ------------------------------------------------------------
+# Dataset profile
+# ------------------------------------------------------------
+
+def dataset_profile_report(headers: List[str], rows: List[Dict[str, str]]) -> str:
+    total_rows = len(rows)
+    numeric = numeric_columns(headers, rows)
+    row_tuples = [tuple(str(row.get(header, "")).strip() for header in headers) for row in rows]
+    duplicate_rows = total_rows - len(set(row_tuples))
+
+    lines = [
+        "Advanced dataset profile 📄📊",
+        "",
+        f"Rows analyzed: {total_rows}",
+        f"Columns: {len(headers)}",
+        f"Duplicate rows: {duplicate_rows}",
+        f"Numeric columns: {len(numeric)}",
+        f"Categorical/text columns: {len(headers) - len(numeric)}",
+        "",
+        "Column overview:",
+    ]
+
+    constant_columns = []
+    likely_id_columns = []
+    high_cardinality_columns = []
+
+    for header in headers:
+        values = [str(row.get(header, "")).strip() for row in rows]
+        non_missing = [value for value in values if value != ""]
+        missing = total_rows - len(non_missing)
+        unique = len(set(non_missing))
+        missing_pct = missing / total_rows if total_rows else 0
+        unique_ratio = unique / len(non_missing) if non_missing else 0
+        col_type = "numeric" if header in numeric else "categorical/text"
+
+        if unique <= 1:
+            constant_columns.append(header)
+        if len(non_missing) >= max(10, int(0.8 * total_rows)) and unique_ratio >= 0.95:
+            likely_id_columns.append(header)
+        if col_type != "numeric" and unique_ratio >= 0.5 and unique >= 20:
+            high_cardinality_columns.append(header)
+
+        lines.append(
+            f"- {header}: {col_type}, missing={missing} ({nice_number(missing_pct * 100)}%), unique={unique}"
+        )
+
+    lines.extend(["", "Quality checks:"])
+    lines.append("Constant columns: " + (", ".join(constant_columns) if constant_columns else "none"))
+    lines.append("Possible ID columns: " + (", ".join(likely_id_columns) if likely_id_columns else "none"))
+    lines.append("High-cardinality categorical columns: " + (", ".join(high_cardinality_columns) if high_cardinality_columns else "none"))
+
+    lines.extend(["", "Numeric summaries:"])
+    if numeric:
+        for header, values in list(numeric.items())[:25]:
+            sorted_values = sorted(values)
+            lines.append(
+                f"- {header}: count={len(values)}, mean={nice_number(mean(values))}, median={nice_number(quantile(sorted_values, 0.5))}, std={nice_number(math.sqrt(population_variance(values)))}, min={nice_number(min(values))}, max={nice_number(max(values))}"
+            )
+    else:
+        lines.append("No numeric columns detected.")
+
+    lines.extend(["", "Categorical summaries:"])
+    for header in headers:
+        if header in numeric:
+            continue
+        values = [str(row.get(header, "")).strip() for row in rows if str(row.get(header, "")).strip() != ""]
+        top_values = Counter(values).most_common(5)
+        top_text = ", ".join(f"{name} ({count})" for name, count in top_values) if top_values else "none"
+        lines.append(f"- {header}: top={top_text}")
+
+    if len(numeric) >= 2:
+        lines.extend(["", "Top numeric correlations:"])
+        correlations = []
+        cols = list(numeric.keys())
+        for i in range(len(cols)):
+            for j in range(i + 1, len(cols)):
+                points = paired_numeric_values(rows, cols[i], cols[j])
+                if len(points) >= 3:
+                    try:
+                        r = pearson_correlation(points)
+                        correlations.append((abs(r), r, cols[i], cols[j], len(points)))
+                    except Exception:
+                        pass
+        correlations.sort(reverse=True)
+        if correlations:
+            for _, r, a, b, n in correlations[:10]:
+                lines.append(f"- {a} vs {b}: r={nice_number(r)}, n={n}")
+        else:
+            lines.append("No correlations available.")
+
+    return "\n".join(lines)
+
+
+async def dataset_profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    try:
+        csv_text = await download_csv_text(update)
+        headers, rows = load_csv_table(csv_text)
+        report = dataset_profile_report(headers, rows)
+    except Exception as error:
+        await update.message.reply_text(
+            "Dataset profile error.\n\n"
+            f"Error: {error}\n\n"
+            "Usage: reply to a CSV file with /dataset_profile"
+        )
+        return
+
+    if len(report) <= 3500:
+        await update.message.reply_text(report)
+    else:
+        await update.message.reply_document(document=text_to_file(report, "dataset_profile.txt"), caption="Advanced dataset profile")
 
 # ------------------------------------------------------------
 # Help and registration
@@ -1346,13 +2816,42 @@ def register_data_science_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("correlation", correlation_command))
     app.add_handler(CommandHandler("linear_regression", linear_regression_command))
     app.add_handler(CommandHandler("linreg", linear_regression_command))
+
+    # Advanced regression and ML
+    app.add_handler(CommandHandler("poly_regression", poly_regression_command))
+    app.add_handler(CommandHandler("polyreg", poly_regression_command))
+    app.add_handler(CommandHandler("multiple_regression", multiple_regression_command))
+    app.add_handler(CommandHandler("multireg", multiple_regression_command))
+    app.add_handler(CommandHandler("logistic_regression", logistic_regression_command))
+    app.add_handler(CommandHandler("logreg", logistic_regression_command))
+    app.add_handler(CommandHandler("pca", pca_command))
+
     app.add_handler(CommandHandler("kmeans", kmeans_command))
+    app.add_handler(CommandHandler("kmeans_auto", kmeans_auto_command))
+    app.add_handler(CommandHandler("kauto", kmeans_auto_command))
     app.add_handler(CommandHandler("outliers", outliers_command))
     app.add_handler(CommandHandler("normalize", normalize_command))
+
+    # Time series
+    app.add_handler(CommandHandler("moving_average", moving_average_command))
+    app.add_handler(CommandHandler("movingavg", moving_average_command))
+    app.add_handler(CommandHandler("forecast", forecast_command))
+
+    # Classification and hypothesis tests
     app.add_handler(CommandHandler("confusion_matrix", confusion_matrix_command))
     app.add_handler(CommandHandler("confmatrix", confusion_matrix_command))
+    app.add_handler(CommandHandler("ttest", ttest_command))
+    app.add_handler(CommandHandler("chisquare", chisquare_command))
+
+    # CSV tools
     app.add_handler(CommandHandler("csv_analyze", csv_analyze_command))
+    app.add_handler(CommandHandler("corr_matrix", corr_matrix_command))
+    app.add_handler(CommandHandler("corrmatrix", corr_matrix_command))
+    app.add_handler(CommandHandler("pairplot", pairplot_command))
+    app.add_handler(CommandHandler("dataset_profile", dataset_profile_command))
+    app.add_handler(CommandHandler("profile_csv", dataset_profile_command))
+
     app.add_handler(CommandHandler("dshelp", dshelp_command))
 
-    # Only reacts when the document caption starts with /csv_analyze.
+    # Only reacts when the document caption starts with a supported CSV command.
     app.add_handler(MessageHandler(filters.Document.ALL, csv_document_message_handler), group=20)

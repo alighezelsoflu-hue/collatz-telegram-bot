@@ -1,4 +1,3 @@
-import os
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -37,29 +36,29 @@ FULL_WEBHOOK_URL = f"{WEBHOOK_URL.rstrip('/')}/{WEBHOOK_PATH}"
 
 
 # ------------------------------------------------------------
-# Telegram app + FastAPI app
+# Apps
 # ------------------------------------------------------------
 
 telegram_app = Application.builder().token(TOKEN).build()
-api = FastAPI(title="LakLak Telegram Bot")
+api = FastAPI(title="AhBashin Telegram Bot")
 
 
 # ------------------------------------------------------------
-# Main help text
+# Help texts
 # ------------------------------------------------------------
 
 def main_help_text() -> str:
     return (
-        "LakLak Bot 🦆\n\n"
-        "Use the category help commands below. Most commands are hidden from the Telegram menu "
-        "to avoid Telegram's 100-command limit, but they still work if you type them manually.\n\n"
-        "Main help:\n"
-        "/mathhelp - math, plots, primes, calculus, Collatz, Fibonacci\n"
-        "/graphhelp - graph theory, Dijkstra, shortest path, convex hull\n"
-        "/dshelp - data science, statistics, regression, clustering, CSV\n"
+        "AhBashin Bot 🦆\n\n"
+        "The Telegram slash menu shows only category help commands to avoid Telegram's "
+        "100-command limit. Hidden commands still work when typed manually.\n\n"
+        "Main help menus:\n"
+        "/mathhelp - math, plots, calculus, primes, Collatz, Fibonacci\n"
+        "/graphhelp - graph theory, Dijkstra, shortest path, MST, convex hull\n"
+        "/dshelp - data science, ML, CSV analysis, regression, PCA, forecasting\n"
         "/physicshelp - physics calculators and plots\n"
         "/astrohelp - astronomy, moon, planets, meteor showers\n"
-        "/chemhelp - chemistry, elements, molar mass, balance, pH, gas laws\n"
+        "/chemhelp - chemistry, elements, molar mass, balancing, pH, gas law\n"
         "/photohelp - photo tools\n"
         "/birthday_help - birthday manager\n"
         "/dart_help - dart game\n"
@@ -69,8 +68,8 @@ def main_help_text() -> str:
         "/activity_help - group activity commands\n\n"
         "Examples:\n"
         "/plot sin(x) range -6.28 6.28\n"
-        "/dijkstra A D | A B 4; A C 2; C B 1; B D 5\n"
-        "/linear_regression 1,2; 2,4; 3,5; 4,8\n"
+        "/poly_regression degree 2 | 1,2; 2,5; 3,10; 4,17; 5,26\n"
+        "/forecast steps 5 | 10,12,13,15,18,21\n"
         "/projectile speed=20 angle=45\n"
         "/moonplot\n"
         "/molar_mass Ca(OH)2\n"
@@ -121,7 +120,7 @@ def activity_help_text() -> str:
 
 
 # ------------------------------------------------------------
-# Commands defined in main.py
+# Main command handlers
 # ------------------------------------------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -160,8 +159,8 @@ async def activity_help_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ------------------------------------------------------------
-# Telegram slash-command menu
-# Keep this short. Telegram allows max 100 visible commands.
+# Telegram visible slash-command menu
+# Category/help commands only.
 # ------------------------------------------------------------
 
 async def setup_bot_commands() -> None:
@@ -169,7 +168,6 @@ async def setup_bot_commands() -> None:
         BotCommand("start", "Start bot"),
         BotCommand("help", "Show help"),
 
-        # Category help commands only
         BotCommand("mathhelp", "Math help"),
         BotCommand("graphhelp", "Graph theory help"),
         BotCommand("dshelp", "Data science help"),
@@ -212,10 +210,9 @@ def register_handlers() -> None:
     register_downloader_handlers(telegram_app)
     register_birthday_handlers(telegram_app)
     register_game_handlers(telegram_app)
-
     register_photo_handlers(telegram_app)
 
-    # Keep this near the end because it has a silent group message tracker.
+    # Keep this near the end because it includes the silent group activity tracker.
     register_group_activity_handlers(telegram_app)
 
 
@@ -255,7 +252,7 @@ async def on_shutdown() -> None:
 async def root():
     return {
         "status": "ok",
-        "bot": "LakLak Bot",
+        "bot": "AhBashin Bot",
         "webhook": FULL_WEBHOOK_URL,
         "visible_command_menu": "category-only",
         "modules": {
@@ -294,6 +291,6 @@ async def telegram_webhook(request: Request):
         await telegram_app.process_update(update)
     except Exception as error:
         print(f"Webhook processing error: {error}")
-        raise HTTPException(status_code=500, detail="Webhook processing error")
+        return {"ok": False, "error": str(error)}
 
     return {"ok": True}
