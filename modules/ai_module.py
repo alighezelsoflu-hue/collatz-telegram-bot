@@ -1,5 +1,5 @@
 """
-AI text tools module for LakLak Telegram Bot.
+AI text tools module for AhBashin Telegram Bot.
 
 Free-provider design:
 - Default: Groq free tier if GROQ_API_KEY is set.
@@ -297,7 +297,7 @@ async def askai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     text = get_message_text(update, context)
     await run_ai_command(
         update,
-        "You are LakLak Bot, a helpful, concise Telegram assistant. Give accurate, practical answers.",
+        "You are AhBashin Bot, a helpful, concise Telegram assistant. Give accurate, practical answers.",
         text,
         "Usage:\n/askai explain black holes simply\n\nYou can also reply to a message with /askai",
         temperature=0.5,

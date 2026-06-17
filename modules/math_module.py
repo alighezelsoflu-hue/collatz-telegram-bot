@@ -246,6 +246,152 @@ def evaluate_function(expr: str, variable_name: str, variable_value: float) -> f
 
 
 # ============================================================
+# Optional AI explanation integration
+# ============================================================
+
+MATH_AI_TRIGGER_WORDS = {"ai", "explain", "explanation", "interpret", "tutor"}
+
+try:
+    from modules.ai_module import call_ai, AIProviderError
+except Exception:
+    call_ai = None
+
+    class AIProviderError(Exception):
+        pass
+
+
+def split_math_ai_request(args: Sequence[str]) -> Tuple[List[str], bool]:
+    """Remove optional AI trigger words from a math command.
+
+    Examples:
+    /stats 4,7,9 explain -> args become ["4,7,9"], wants_ai=True
+    /plot sin(x) range -6 6 ai -> args become ["sin(x)", "range", "-6", "6"]
+    """
+    cleaned: List[str] = []
+    wants_ai = False
+
+    for arg in args:
+        normalized = arg.strip().lower().strip(".,!?:;()[]{}")
+        if normalized in MATH_AI_TRIGGER_WORDS:
+            wants_ai = True
+            continue
+        cleaned.append(arg)
+
+    return cleaned, wants_ai
+
+
+async def send_math_ai_explanation(
+    update: Update,
+    command_name: str,
+    user_input: str,
+    deterministic_context: str = "",
+) -> None:
+    if not update.message:
+        return
+
+    if call_ai is None:
+        await update.message.reply_text(
+            "AI explanation is not available because modules.ai_module could not be imported."
+        )
+        return
+
+    user_input = user_input.strip()
+    deterministic_context = deterministic_context.strip()
+
+    if deterministic_context and len(deterministic_context) > 2500:
+        deterministic_context = deterministic_context[:2500] + "\n...[truncated]"
+
+    system_prompt = (
+        "You are AhBashin Bot's math tutor. Explain math and statistics results clearly, briefly, "
+        "and accurately for a student. The bot's deterministic math module already performed the "
+        "calculation, so do not override or contradict it. If you notice possible limitations, mention "
+        "them gently. Use step-by-step explanations when useful, but keep the answer concise."
+    )
+
+    prompt_parts = [
+        f"Math command: /{command_name}",
+        f"User input: {user_input or '(no input)'}",
+    ]
+
+    if deterministic_context:
+        prompt_parts.append(f"Result/context from the math module:\n{deterministic_context}")
+
+    prompt_parts.append(
+        "Explain what this result means, what mathematical idea is involved, and how the user should interpret it. "
+        "For plots, explain the axes, shape, and important features."
+    )
+
+    try:
+        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=0.25)
+    except Exception as error:
+        await update.message.reply_text(f"AI math explanation error.\n\nError: {error}")
+        return
+
+    text = "AI math explanation 🧠\n\n" + explanation
+    for chunk in split_long_text(text, limit=3500):
+        await update.message.reply_text(chunk)
+
+
+def math_ai_wrapper(command_name: str, handler):
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        original_args = list(getattr(context, "args", []) or [])
+        cleaned_args, wants_ai = split_math_ai_request(original_args)
+        context.args = cleaned_args
+
+        try:
+            await handler(update, context)
+        finally:
+            context.args = original_args
+
+        if wants_ai:
+            await send_math_ai_explanation(
+                update,
+                command_name=command_name,
+                user_input=" ".join(cleaned_args),
+            )
+
+    return wrapped
+
+
+async def math_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Explain a math request/result using AI.
+
+    Usage:
+    /math_ai explain derivative of x^3
+    or reply to a math result/plot caption with /math_ai
+    """
+    if not update.message:
+        return
+
+    text = " ".join(context.args).strip()
+
+    if not text and update.message.reply_to_message:
+        reply = update.message.reply_to_message
+        if reply.text:
+            text = reply.text.strip()
+        elif reply.caption:
+            text = reply.caption.strip()
+
+    if not text:
+        await update.message.reply_text(
+            "Math AI usage:\n\n"
+            "Add ai/explain to a math command:\n"
+            "/stats 4,7,9,10 explain\n"
+            "/plot sin(x) range -6.28 6.28 ai\n\n"
+            "Or reply to a math result with:\n"
+            "/math_ai"
+        )
+        return
+
+    await send_math_ai_explanation(
+        update,
+        command_name="math_ai",
+        user_input=text,
+        deterministic_context=text,
+    )
+
+
+# ============================================================
 # Basic calculator commands
 # ============================================================
 
@@ -1658,7 +1804,12 @@ def math_help_text() -> str:
         "/collatzplot 27\n"
         "/fibspiral 10\n"
         "/polarplot 1 + sin(theta) range 0 6.28\n"
-        "/paramplot cos(t); sin(t) range 0 6.28"
+        "/paramplot cos(t); sin(t) range 0 6.28\n\n"
+        "AI explanation:\n"
+        "Add ai, explain, or interpret to most math commands.\n"
+        "/stats 4,7,9,10 explain\n"
+        "/plot sin(x) range -6.28 6.28 ai\n"
+        "Or reply to a math result with /math_ai"
     )
 
 
@@ -1673,39 +1824,41 @@ async def mathhelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 def register_math_handlers(app: Application) -> None:
-    app.add_handler(CommandHandler("calc", calc_command))
-    app.add_handler(CommandHandler("calculate", calc_command))
-    app.add_handler(CommandHandler("calculator", calc_command))
-    app.add_handler(CommandHandler("pi", pi_command))
-    app.add_handler(CommandHandler("e", e_command))
+    def add(names: Sequence[str], handler, command_name: str) -> None:
+        wrapped = math_ai_wrapper(command_name, handler)
+        for name in names:
+            app.add_handler(CommandHandler(name, wrapped))
 
-    app.add_handler(CommandHandler("collatz", collatz_command))
-    app.add_handler(CommandHandler("fib", fib_command))
-    app.add_handler(CommandHandler("fibonacci", fib_command))
-    app.add_handler(CommandHandler("fiblist", fiblist_command))
+    add(["calc", "calculate", "calculator"], calc_command, "calc")
+    add(["pi"], pi_command, "pi")
+    add(["e"], e_command, "e")
 
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("statistics", stats_command))
-    app.add_handler(CommandHandler("statsfile", statsfile_command))
+    add(["collatz"], collatz_command, "collatz")
+    add(["fib", "fibonacci"], fib_command, "fib")
+    add(["fiblist"], fiblist_command, "fiblist")
 
-    app.add_handler(CommandHandler("polyroots", polyroots_command))
-    app.add_handler(CommandHandler("roots", polyroots_command))
-    app.add_handler(CommandHandler("primes", primes_command))
-    app.add_handler(CommandHandler("primesfile", primesfile_command))
-    app.add_handler(CommandHandler("polyplot", polyplot_command))
-    app.add_handler(CommandHandler("plotpoly", polyplot_command))
+    add(["stats", "statistics"], stats_command, "stats")
+    add(["statsfile"], statsfile_command, "statsfile")
 
-    app.add_handler(CommandHandler("plot", plot_command))
-    app.add_handler(CommandHandler("derivative", derivative_command))
-    app.add_handler(CommandHandler("tangent", tangent_command))
-    app.add_handler(CommandHandler("integral", integral_command))
-    app.add_handler(CommandHandler("areaplot", areaplot_command))
-    app.add_handler(CommandHandler("newton", newton_command))
-    app.add_handler(CommandHandler("primecount", primecount_command))
-    app.add_handler(CommandHandler("primegap", primegap_command))
-    app.add_handler(CommandHandler("collatzplot", collatzplot_command))
-    app.add_handler(CommandHandler("fibspiral", fibspiral_command))
-    app.add_handler(CommandHandler("polarplot", polarplot_command))
-    app.add_handler(CommandHandler("paramplot", paramplot_command))
+    add(["polyroots", "roots"], polyroots_command, "polyroots")
+    add(["primes"], primes_command, "primes")
+    add(["primesfile"], primesfile_command, "primesfile")
+    add(["polyplot", "plotpoly"], polyplot_command, "polyplot")
 
+    add(["plot"], plot_command, "plot")
+    add(["derivative"], derivative_command, "derivative")
+    add(["tangent"], tangent_command, "tangent")
+    add(["integral"], integral_command, "integral")
+    add(["areaplot"], areaplot_command, "areaplot")
+    add(["newton"], newton_command, "newton")
+    add(["primecount"], primecount_command, "primecount")
+    add(["primegap"], primegap_command, "primegap")
+    add(["collatzplot"], collatzplot_command, "collatzplot")
+    add(["fibspiral"], fibspiral_command, "fibspiral")
+    add(["polarplot"], polarplot_command, "polarplot")
+    add(["paramplot"], paramplot_command, "paramplot")
+
+    app.add_handler(CommandHandler("math_ai", math_ai_command))
+    app.add_handler(CommandHandler("mathai", math_ai_command))
     app.add_handler(CommandHandler("mathhelp", mathhelp_command))
+
