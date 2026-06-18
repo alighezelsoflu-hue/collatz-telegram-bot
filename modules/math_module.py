@@ -292,9 +292,10 @@ def extract_tutor_language(text: str) -> tuple[str, str]:
     return text.strip(), "English"
 
 try:
-    from modules.ai_module import call_ai, AIProviderError
+    from modules.ai_module import call_ai, call_ai_with_history, AIProviderError
 except Exception:
     call_ai = None
+    call_ai_with_history = None
 
     class AIProviderError(Exception):
         pass
@@ -395,7 +396,17 @@ async def send_math_ai_explanation(
     prompt_parts.append(final_instruction)
 
     try:
-        explanation = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
+        ai_prompt = "\n\n".join(prompt_parts)
+        if call_ai_with_history is not None:
+            explanation = await call_ai_with_history(
+                update=update,
+                system_prompt=system_prompt,
+                user_prompt=ai_prompt,
+                topic="math",
+                temperature=temperature,
+            )
+        else:
+            explanation = await call_ai(system_prompt, ai_prompt, temperature=temperature)
     except Exception as error:
         label = "tutor" if is_tutor else "explanation"
         await update.message.reply_text(f"AI math {label} error.\n\nError: {error}")

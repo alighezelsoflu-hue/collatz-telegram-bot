@@ -24,8 +24,9 @@ AI_MODEL=meta-llama/llama-3.3-70b-instruct:free
 import os
 import re
 import math
-from collections import Counter
-from typing import List, Optional, Tuple
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 from telegram import Update
@@ -52,6 +53,350 @@ except Exception:
         output.name = filename
         return output
 
+
+
+# ------------------------------------------------------------
+# Persistent per-user AI memory
+# ------------------------------------------------------------
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # psycopg is optional for local tests; Render should have psycopg[binary].
+    psycopg = None
+    dict_row = None
+
+
+AI_MEMORY_ENABLED = os.getenv("AI_MEMORY_ENABLED", "true").strip().lower() not in {"0", "false", "no", "off"}
+AI_MEMORY_MAX_MESSAGES = int(os.getenv("AI_MEMORY_MAX_MESSAGES", "16"))
+AI_MEMORY_MAX_MESSAGE_CHARS = int(os.getenv("AI_MEMORY_MAX_MESSAGE_CHARS", "2500"))
+AI_MEMORY_MAX_TOTAL_CHARS = int(os.getenv("AI_MEMORY_MAX_TOTAL_CHARS", "12000"))
+AI_MEMORY_DB_URL = os.getenv("DATABASE_URL", "").strip()
+
+AI_TOPIC_ALIASES: Dict[str, str] = {
+    "general": "general",
+    "chat": "general",
+    "ai": "general",
+    "math": "math",
+    "mathematics": "math",
+    "data": "data_science",
+    "ds": "data_science",
+    "data_science": "data_science",
+    "datascience": "data_science",
+    "stats": "data_science",
+    "statistics": "data_science",
+    "physics": "physics",
+    "phys": "physics",
+    "chem": "chemistry",
+    "chemistry": "chemistry",
+    "astro": "astronomy",
+    "astronomy": "astronomy",
+    "space": "astronomy",
+    "photo": "photo",
+    "image": "photo",
+    "vision": "photo",
+}
+
+AI_TOPIC_LABELS = {
+    "general": "General",
+    "math": "Math",
+    "data_science": "Data science",
+    "physics": "Physics",
+    "chemistry": "Chemistry",
+    "astronomy": "Astronomy",
+    "photo": "Photo / vision",
+}
+
+# Fallback memory for local runs without DATABASE_URL. Render restarts will reset this.
+_LOCAL_AI_MEMORY: Dict[tuple, List[Dict[str, str]]] = defaultdict(list)
+_LOCAL_AI_ACTIVE_TOPIC: Dict[tuple, str] = {}
+_AI_MEMORY_DB_READY = False
+
+
+def normalize_ai_topic(topic: Optional[str]) -> str:
+    if not topic:
+        return "general"
+    key = str(topic).strip().lower().replace("-", "_")
+    return AI_TOPIC_ALIASES.get(key, key if key in AI_TOPIC_LABELS else "general")
+
+
+def split_topic_prefix(text: str) -> Tuple[Optional[str], str]:
+    """If the first token is a topic, return (topic, text_without_topic)."""
+    parts = (text or "").strip().split(maxsplit=1)
+    if not parts:
+        return None, ""
+    maybe = normalize_ai_topic(parts[0])
+    raw = parts[0].strip().lower().replace("-", "_")
+    if raw in AI_TOPIC_ALIASES or raw in AI_TOPIC_LABELS:
+        return maybe, parts[1].strip() if len(parts) > 1 else ""
+    return None, text.strip()
+
+
+def _memory_identity(update: Optional[Update]) -> Tuple[str, str]:
+    chat_id = "unknown_chat"
+    user_id = "unknown_user"
+    try:
+        if update and update.effective_chat:
+            chat_id = str(update.effective_chat.id)
+        if update and update.effective_user:
+            user_id = str(update.effective_user.id)
+        elif update and update.effective_chat:
+            user_id = str(update.effective_chat.id)
+    except Exception:
+        pass
+    return chat_id, user_id
+
+
+def _truncate_memory_text(text: str) -> str:
+    text = (text or "").strip()
+    if len(text) > AI_MEMORY_MAX_MESSAGE_CHARS:
+        return text[:AI_MEMORY_MAX_MESSAGE_CHARS] + "\n...[truncated]"
+    return text
+
+
+def _db_enabled() -> bool:
+    return bool(AI_MEMORY_ENABLED and AI_MEMORY_DB_URL and psycopg is not None)
+
+
+def _connect_memory_db():
+    return psycopg.connect(AI_MEMORY_DB_URL, row_factory=dict_row)
+
+
+def ensure_ai_memory_tables() -> None:
+    global _AI_MEMORY_DB_READY
+    if _AI_MEMORY_DB_READY or not _db_enabled():
+        return
+    with _connect_memory_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_chat_messages (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    topic TEXT NOT NULL DEFAULT 'general',
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_lookup
+                ON ai_chat_messages (chat_id, user_id, topic, id DESC)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_chat_state (
+                    chat_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    active_topic TEXT NOT NULL DEFAULT 'general',
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (chat_id, user_id)
+                )
+                """
+            )
+        conn.commit()
+    _AI_MEMORY_DB_READY = True
+
+
+def set_active_ai_topic(update: Optional[Update], topic: str) -> None:
+    topic = normalize_ai_topic(topic)
+    chat_id, user_id = _memory_identity(update)
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ai_chat_state (chat_id, user_id, active_topic, updated_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (chat_id, user_id)
+                    DO UPDATE SET active_topic = EXCLUDED.active_topic, updated_at = NOW()
+                    """,
+                    (chat_id, user_id, topic),
+                )
+            conn.commit()
+    else:
+        _LOCAL_AI_ACTIVE_TOPIC[(chat_id, user_id)] = topic
+
+
+def get_active_ai_topic(update: Optional[Update]) -> str:
+    chat_id, user_id = _memory_identity(update)
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT active_topic FROM ai_chat_state WHERE chat_id=%s AND user_id=%s",
+                    (chat_id, user_id),
+                )
+                row = cur.fetchone()
+                return normalize_ai_topic(row["active_topic"]) if row else "general"
+    return _LOCAL_AI_ACTIVE_TOPIC.get((chat_id, user_id), "general")
+
+
+def save_ai_message(update: Optional[Update], topic: str, role: str, content: str) -> None:
+    if not AI_MEMORY_ENABLED:
+        return
+    topic = normalize_ai_topic(topic)
+    role = "assistant" if role == "assistant" else "user"
+    content = _truncate_memory_text(content)
+    if not content:
+        return
+    chat_id, user_id = _memory_identity(update)
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ai_chat_messages (chat_id, user_id, topic, role, content)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (chat_id, user_id, topic, role, content),
+                )
+            conn.commit()
+    else:
+        key = (chat_id, user_id, topic)
+        _LOCAL_AI_MEMORY[key].append({"role": role, "content": content})
+        _LOCAL_AI_MEMORY[key] = _LOCAL_AI_MEMORY[key][-AI_MEMORY_MAX_MESSAGES * 2:]
+
+
+def save_ai_turn(update: Optional[Update], topic: str, user_prompt: str, assistant_response: str) -> None:
+    topic = normalize_ai_topic(topic)
+    save_ai_message(update, topic, "user", user_prompt)
+    save_ai_message(update, topic, "assistant", assistant_response)
+    set_active_ai_topic(update, topic)
+
+
+def get_ai_history(update: Optional[Update], topic: str, limit: Optional[int] = None) -> List[Dict[str, str]]:
+    topic = normalize_ai_topic(topic)
+    limit = int(limit or AI_MEMORY_MAX_MESSAGES)
+    chat_id, user_id = _memory_identity(update)
+    if not AI_MEMORY_ENABLED:
+        return []
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content
+                    FROM ai_chat_messages
+                    WHERE chat_id=%s AND user_id=%s AND topic=%s
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (chat_id, user_id, topic, limit),
+                )
+                rows = cur.fetchall() or []
+                rows = list(reversed(rows))
+                return [{"role": row["role"], "content": row["content"]} for row in rows]
+    return list(_LOCAL_AI_MEMORY.get((chat_id, user_id, topic), []))[-limit:]
+
+
+def clear_ai_history(update: Optional[Update], topic: Optional[str] = None, all_topics: bool = False) -> int:
+    chat_id, user_id = _memory_identity(update)
+    if all_topics:
+        if _db_enabled():
+            ensure_ai_memory_tables()
+            with _connect_memory_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM ai_chat_messages WHERE chat_id=%s AND user_id=%s",
+                        (chat_id, user_id),
+                    )
+                    deleted = cur.rowcount or 0
+                    cur.execute(
+                        "DELETE FROM ai_chat_state WHERE chat_id=%s AND user_id=%s",
+                        (chat_id, user_id),
+                    )
+                conn.commit()
+            return deleted
+        deleted = 0
+        for key in list(_LOCAL_AI_MEMORY.keys()):
+            if key[0] == chat_id and key[1] == user_id:
+                deleted += len(_LOCAL_AI_MEMORY[key])
+                del _LOCAL_AI_MEMORY[key]
+        _LOCAL_AI_ACTIVE_TOPIC.pop((chat_id, user_id), None)
+        return deleted
+
+    topic = normalize_ai_topic(topic or get_active_ai_topic(update))
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ai_chat_messages WHERE chat_id=%s AND user_id=%s AND topic=%s",
+                    (chat_id, user_id, topic),
+                )
+                deleted = cur.rowcount or 0
+            conn.commit()
+        return deleted
+    key = (chat_id, user_id, topic)
+    deleted = len(_LOCAL_AI_MEMORY.get(key, []))
+    _LOCAL_AI_MEMORY.pop(key, None)
+    return deleted
+
+
+def ai_memory_status_text(update: Optional[Update]) -> str:
+    chat_id, user_id = _memory_identity(update)
+    active = get_active_ai_topic(update)
+    storage = "Postgres/Neon" if _db_enabled() else "local memory fallback"
+    lines = [
+        "AI chat memory 🧠",
+        "",
+        f"Storage: {storage}",
+        f"Active topic: {AI_TOPIC_LABELS.get(active, active)}",
+        "",
+        "Messages by topic:",
+    ]
+    counts = {topic: 0 for topic in AI_TOPIC_LABELS}
+    if _db_enabled():
+        ensure_ai_memory_tables()
+        with _connect_memory_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT topic, COUNT(*) AS count
+                    FROM ai_chat_messages
+                    WHERE chat_id=%s AND user_id=%s
+                    GROUP BY topic
+                    ORDER BY topic
+                    """,
+                    (chat_id, user_id),
+                )
+                for row in cur.fetchall() or []:
+                    counts[normalize_ai_topic(row["topic"])] = int(row["count"])
+    else:
+        for (c, u, topic), items in _LOCAL_AI_MEMORY.items():
+            if c == chat_id and u == user_id:
+                counts[normalize_ai_topic(topic)] = len(items)
+    for topic, label in AI_TOPIC_LABELS.items():
+        lines.append(f"- {label}: {counts.get(topic, 0)}")
+    lines.append("")
+    lines.append("Use /clear_chat to clear the active topic, or /clear_chat all to clear everything.")
+    return "\n".join(lines)
+
+
+def ai_history_preview_text(update: Optional[Update], topic: Optional[str] = None) -> str:
+    topic = normalize_ai_topic(topic or get_active_ai_topic(update))
+    history = get_ai_history(update, topic, limit=10)
+    label = AI_TOPIC_LABELS.get(topic, topic)
+    if not history:
+        return f"No AI history yet for topic: {label}."
+    lines = [f"Recent AI history — {label} 🧠", ""]
+    for item in history:
+        role = "You" if item["role"] == "user" else "AhBashin"
+        content = item["content"].replace("\n", " ").strip()
+        if len(content) > 220:
+            content = content[:220] + "..."
+        lines.append(f"{role}: {content}")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 # ------------------------------------------------------------
 # Render-safe limits
@@ -108,7 +453,13 @@ class AIProviderError(Exception):
     pass
 
 
-async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4) -> str:
+async def call_ai_messages(
+    system_prompt: str,
+    messages: List[Dict[str, str]],
+    temperature: float = 0.4,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Call the configured OpenAI-compatible text model with a message list."""
     provider = get_ai_provider()
     model = get_ai_model(provider)
     url, api_key = get_api_config(provider)
@@ -122,9 +473,22 @@ async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4
             "Offline commands still work: /keywords and /sentiment"
         )
 
-    user_prompt = user_prompt.strip()
-    if len(user_prompt) > MAX_INPUT_CHARS:
-        user_prompt = user_prompt[:MAX_INPUT_CHARS] + "\n\n[Input was truncated for safety.]"
+    safe_messages: List[Dict[str, str]] = []
+    total_chars = 0
+    for item in messages:
+        role = item.get("role", "user")
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        if len(content) > MAX_INPUT_CHARS:
+            content = content[:MAX_INPUT_CHARS] + "\n\n[Input was truncated for safety.]"
+        total_chars += len(content)
+        safe_messages.append({"role": role, "content": content})
+
+    # Keep the newest useful context if the total gets too large.
+    while safe_messages and total_chars > AI_MEMORY_MAX_TOTAL_CHARS:
+        removed = safe_messages.pop(0)
+        total_chars -= len(removed.get("content", ""))
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -139,12 +503,9 @@ async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4
 
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+        "messages": [{"role": "system", "content": system_prompt}] + safe_messages,
         "temperature": temperature,
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": int(max_tokens or MAX_OUTPUT_TOKENS),
     }
 
     try:
@@ -171,6 +532,36 @@ async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4
         raise AIProviderError("AI provider returned an unexpected response format.")
 
     return str(content).strip()
+
+
+async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4) -> str:
+    """One-shot AI call without persistent memory. Existing modules can still use this."""
+    return await call_ai_messages(
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        temperature=temperature,
+    )
+
+
+async def call_ai_with_history(
+    update: Optional[Update],
+    system_prompt: str,
+    user_prompt: str,
+    topic: Optional[str] = None,
+    temperature: float = 0.4,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """
+    Persistent per-user chat call.
+    Memory key: chat_id + user_id + topic, so Ali and Sara in the same group never mix.
+    """
+    selected_topic = normalize_ai_topic(topic or get_active_ai_topic(update))
+    history = get_ai_history(update, selected_topic, limit=AI_MEMORY_MAX_MESSAGES)
+    messages = history + [{"role": "user", "content": user_prompt}]
+    answer = await call_ai_messages(system_prompt, messages, temperature=temperature, max_tokens=max_tokens)
+    save_ai_turn(update, selected_topic, user_prompt, answer)
+    return answer
+
 
 
 
@@ -423,7 +814,12 @@ def ai_help_text() -> str:
         f"Provider: {provider}\n"
         f"Model: {model}\n\n"
         "Commands using AI API:\n"
-        "/askai your question - general AI assistant\n"
+        "/askai your question - AI assistant with your active topic memory\n"
+        "/chat math your question - continue a specific topic memory\n"
+        "/newchat - clear active topic memory\n"
+        "/clear_chat all - clear all your AI memory in this chat\n"
+        "/chat_status - show your private memory status\n"
+        "/chat_history - preview recent memory\n"
         "/summarize long text - summarize text\n"
         "/rewrite formal | text - rewrite in a tone\n"
         "/explain difficult text - simple explanation\n"
@@ -465,14 +861,7 @@ async def aihelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def askai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = get_message_text(update, context)
-    await run_ai_command(
-        update,
-        "You are AhBashin Bot, a helpful, concise Telegram assistant. Give accurate, practical answers.",
-        text,
-        "Usage:\n/askai explain black holes simply\n\nYou can also reply to a message with /askai",
-        temperature=0.5,
-    )
+    await chat_command(update, context)
 
 
 async def summarize_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -668,6 +1057,79 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+
+# ------------------------------------------------------------
+# Persistent chat commands
+# ------------------------------------------------------------
+
+async def chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    raw = get_message_text(update, context)
+    selected_topic, text = split_topic_prefix(raw)
+    topic = selected_topic or get_active_ai_topic(update)
+    if not text:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/chat your message\n"
+            "/chat math continue with another example\n"
+            "/chat data_science explain that result more simply\n\n"
+            "Topics: general, math, data_science, physics, chemistry, astronomy, photo"
+        )
+        return
+    system_prompt = (
+        "You are AhBashin Bot, a helpful Telegram assistant with per-user memory. "
+        "Continue naturally from the user's previous context when it is relevant. "
+        "If previous context is not relevant, answer the new request directly. "
+        "Be clear, practical, and concise."
+    )
+    try:
+        await update.message.chat.send_action(action="typing")
+        answer = await call_ai_with_history(
+            update=update,
+            system_prompt=system_prompt,
+            user_prompt=text,
+            topic=topic,
+            temperature=0.5,
+        )
+    except Exception as error:
+        await update.message.reply_text(f"AI chat error.\n\n{error}")
+        return
+    await send_ai_response(update, answer)
+
+
+async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    raw = " ".join(context.args).strip()
+    if raw.lower() in {"all", "everything", "*"}:
+        deleted = clear_ai_history(update, all_topics=True)
+        await update.message.reply_text(f"Cleared all your AI chat history for this chat. Deleted {deleted} messages.")
+        return
+    topic = normalize_ai_topic(raw) if raw else get_active_ai_topic(update)
+    deleted = clear_ai_history(update, topic=topic)
+    await update.message.reply_text(
+        f"Cleared your {AI_TOPIC_LABELS.get(topic, topic)} AI history in this chat. Deleted {deleted} messages."
+    )
+
+
+async def newchat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await clear_chat_command(update, context)
+
+
+async def chat_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await update.message.reply_text(ai_memory_status_text(update))
+
+
+async def chat_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    raw = " ".join(context.args).strip()
+    topic = normalize_ai_topic(raw) if raw else get_active_ai_topic(update)
+    await update.message.reply_text(ai_history_preview_text(update, topic))
+
 # ------------------------------------------------------------
 # Registration
 # ------------------------------------------------------------
@@ -677,6 +1139,12 @@ def register_ai_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("aihelp", aihelp_command))
     app.add_handler(CommandHandler("askai", askai_command))
     app.add_handler(CommandHandler("ai", askai_command))
+    app.add_handler(CommandHandler("chat", chat_command))
+    app.add_handler(CommandHandler("continue", chat_command))
+    app.add_handler(CommandHandler("newchat", newchat_command))
+    app.add_handler(CommandHandler("clear_chat", clear_chat_command))
+    app.add_handler(CommandHandler("chat_status", chat_status_command))
+    app.add_handler(CommandHandler("chat_history", chat_history_command))
     app.add_handler(CommandHandler("summarize", summarize_command))
     app.add_handler(CommandHandler("rewrite", rewrite_command))
     app.add_handler(CommandHandler("explain", explain_command))

@@ -168,9 +168,10 @@ def data_science_tutor_system_prompt(language: str = "English") -> str:
 
 
 try:
-    from modules.ai_module import call_ai
+    from modules.ai_module import call_ai, call_ai_with_history
 except Exception:
     call_ai = None
+    call_ai_with_history = None
 
 
 async def send_ai_text_output(update: Update, output: str, filename: str, caption: str) -> None:
@@ -245,7 +246,17 @@ async def send_data_science_ai_summary(
 
     try:
         await update.message.chat.send_action(action="typing")
-        answer = await call_ai(system_prompt, "\n\n".join(prompt_parts), temperature=temperature)
+        ai_prompt = "\n\n".join(prompt_parts)
+        if call_ai_with_history is not None:
+            answer = await call_ai_with_history(
+                update=update,
+                system_prompt=system_prompt,
+                user_prompt=ai_prompt,
+                topic="data_science",
+                temperature=temperature,
+            )
+        else:
+            answer = await call_ai(system_prompt, ai_prompt, temperature=temperature)
     except Exception as error:
         await update.message.reply_text(f"AI data-science {mode} error.\n\n{error}")
         return
@@ -286,7 +297,16 @@ async def send_data_science_tutor_response(
 
     try:
         await update.message.chat.send_action(action="typing")
-        answer = await call_ai(data_science_tutor_system_prompt(language), prompt, temperature=0.35)
+        if call_ai_with_history is not None:
+            answer = await call_ai_with_history(
+                update=update,
+                system_prompt=data_science_tutor_system_prompt(language),
+                user_prompt=prompt,
+                topic="data_science",
+                temperature=0.35,
+            )
+        else:
+            answer = await call_ai(data_science_tutor_system_prompt(language), prompt, temperature=0.35)
     except Exception as error:
         await update.message.reply_text(f"AI data-science tutor error.\n\n{error}")
         return

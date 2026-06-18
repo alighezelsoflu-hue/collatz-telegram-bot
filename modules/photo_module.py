@@ -26,12 +26,13 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 try:
-    from modules.ai_module import AIProviderError, call_ai, call_ai_vision, send_ai_response
+    from modules.ai_module import AIProviderError, call_ai, call_ai_vision, send_ai_response, save_ai_turn
 except Exception:
     AIProviderError = Exception
     call_ai = None
     call_ai_vision = None
     send_ai_response = None
+    save_ai_turn = None
 
 
 # ------------------------------------------------------------
@@ -646,6 +647,11 @@ async def run_vision_on_photo(update: Update, image_bytes: bytes, command: str, 
     except Exception as error:
         await update.message.reply_text(f"AI photo error.\n\n{error}")
         return
+    if save_ai_turn is not None:
+        try:
+            save_ai_turn(update, "photo", f"/{command} {prompt}".strip(), answer)
+        except Exception:
+            pass
     await reply_long_text(update, answer)
 
 
