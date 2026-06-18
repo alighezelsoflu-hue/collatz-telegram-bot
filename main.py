@@ -46,8 +46,8 @@ def main_help_text() -> str:
         "/physicshelp - physics calculators and plots\n"
         "/astrohelp - astronomy, moon, planets, meteor showers\n"
         "/chemhelp - chemistry, elements, molar mass, balancing, pH, gas law\n"
-        "/aihelp - AI text tools\n"
-        "/photohelp - photo tools\n"
+        "/aihelp - AI text tools and AI provider status\n"
+        "/photohelp - photo editing, smart photo, and AI vision tools\n"
         "/birthday_help - birthday manager\n"
         "/dart_help - dart game\n"
         "/downloader_help - X/Twitter downloader\n"
@@ -214,6 +214,7 @@ async def root():
             "chemistry": True,
             "ai": True,
             "photos": True,
+            "ai_vision": True,
             "world_cup": True,
             "news": True,
             "downloader": True,

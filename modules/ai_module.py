@@ -173,6 +173,173 @@ async def call_ai(system_prompt: str, user_prompt: str, temperature: float = 0.4
     return str(content).strip()
 
 
+
+
+# ------------------------------------------------------------
+# Vision / image understanding helpers
+# ------------------------------------------------------------
+
+import base64
+from io import BytesIO
+
+try:
+    from PIL import Image
+except Exception:  # Pillow is normally installed for photo tools.
+    Image = None
+
+
+MAX_VISION_IMAGE_BYTES = int(os.getenv("AI_VISION_MAX_IMAGE_BYTES", "3500000"))
+MAX_VISION_SIDE = int(os.getenv("AI_VISION_MAX_SIDE", "1280"))
+
+
+def get_ai_vision_provider() -> str:
+    configured = os.getenv("AI_VISION_PROVIDER", "").strip().lower()
+    if configured:
+        return configured
+    return get_ai_provider()
+
+
+def get_ai_vision_model(provider: str) -> str:
+    configured = os.getenv("AI_VISION_MODEL", "").strip()
+    if configured:
+        return configured
+    if provider == "groq":
+        # Current Groq vision-capable model. Override AI_VISION_MODEL in Render if Groq changes model names.
+        return "meta-llama/llama-4-scout-17b-16e-instruct"
+    if provider == "openrouter":
+        # OpenRouter free vision model names can change. Set AI_VISION_MODEL in Render for best results.
+        return os.getenv("AI_MODEL", "qwen/qwen2.5-vl-32b-instruct:free")
+    if provider == "openai":
+        return os.getenv("AI_MODEL", "gpt-4o-mini")
+    return "offline"
+
+
+def _prepare_image_for_vision(image_bytes: bytes, mime_type: str = "image/jpeg") -> Tuple[bytes, str]:
+    """Compress/resize image so it is safe for vision APIs and Telegram downloads."""
+    if Image is None:
+        if len(image_bytes) > MAX_VISION_IMAGE_BYTES:
+            raise AIProviderError("Pillow is not available and the image is too large for vision upload.")
+        return image_bytes, mime_type
+
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        image = image.convert("RGB")
+        image.thumbnail((MAX_VISION_SIDE, MAX_VISION_SIDE))
+    except Exception as error:
+        raise AIProviderError(f"Could not read image for AI vision: {error}")
+
+    quality = 88
+    while quality >= 45:
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=quality, optimize=True)
+        prepared = output.getvalue()
+        if len(prepared) <= MAX_VISION_IMAGE_BYTES:
+            return prepared, "image/jpeg"
+        quality -= 8
+
+    raise AIProviderError(
+        "Image is too large for AI vision after compression. Try sending a smaller photo."
+    )
+
+
+async def call_ai_vision(
+    system_prompt: str,
+    user_prompt: str,
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+    temperature: float = 0.25,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Call an OpenAI-compatible vision model with one image and text prompt."""
+    provider = get_ai_vision_provider()
+    model = get_ai_vision_model(provider)
+    url, api_key = get_api_config(provider)
+
+    if provider == "offline" or not url or not api_key:
+        raise AIProviderError(
+            "AI vision is not configured. For Groq, set these Render env vars:\n"
+            "AI_PROVIDER=groq\n"
+            "GROQ_API_KEY=your_key\n"
+            "AI_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct"
+        )
+
+    user_prompt = (user_prompt or "What is in this image?").strip()
+    if len(user_prompt) > MAX_INPUT_CHARS:
+        user_prompt = user_prompt[:MAX_INPUT_CHARS] + "\n\n[Prompt was truncated for safety.]"
+
+    prepared_bytes, prepared_mime = _prepare_image_for_vision(image_bytes, mime_type=mime_type)
+    base64_image = base64.b64encode(prepared_bytes).decode("utf-8")
+    data_url = f"data:{prepared_mime};base64,{base64_image}"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    if provider == "openrouter":
+        site_url = os.getenv("OPENROUTER_SITE_URL", "https://collatz-telegram-bot.onrender.com")
+        app_name = os.getenv("OPENROUTER_APP_NAME", "AhBashin Telegram Bot")
+        headers["HTTP-Referer"] = site_url
+        headers["X-Title"] = app_name
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ],
+        "temperature": temperature,
+        "max_tokens": int(max_tokens or MAX_OUTPUT_TOKENS),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=AI_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException:
+        raise AIProviderError("The AI vision provider timed out. Try a smaller image or shorter prompt.")
+    except Exception as error:
+        raise AIProviderError(f"Could not contact AI vision provider: {error}")
+
+    if response.status_code >= 400:
+        error_text = response.text[:1200]
+        raise AIProviderError(
+            f"AI vision provider error {response.status_code}.\n\n"
+            f"Provider: {provider}\n"
+            f"Model: {model}\n"
+            f"Message: {error_text}"
+        )
+
+    try:
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+    except Exception:
+        raise AIProviderError("AI vision provider returned an unexpected response format.")
+
+    return str(content).strip()
+
+
+async def ask_ai_text(
+    user_prompt: str,
+    system_prompt: str = "You are AhBashin Bot, a helpful assistant.",
+    max_tokens: int = 900,
+    temperature: float = 0.3,
+) -> str:
+    """Shared helper used by other modules."""
+    old_max = os.environ.get("AI_MAX_OUTPUT_TOKENS")
+    try:
+        # call_ai reads the module-level MAX_OUTPUT_TOKENS, so max_tokens is advisory for callers.
+        return await call_ai(system_prompt=system_prompt, user_prompt=user_prompt, temperature=temperature)
+    finally:
+        if old_max is not None:
+            os.environ["AI_MAX_OUTPUT_TOKENS"] = old_max
+
+
 # ------------------------------------------------------------
 # Text extraction helpers
 # ------------------------------------------------------------
@@ -266,7 +433,11 @@ def ai_help_text() -> str:
         "/code_explain code - explain code\n"
         "/code_fix error/code - suggest a fix\n"
         "/regex request - generate regex\n"
-        "/sql request - generate SQL\n\n"
+        "/sql request - generate SQL\n"
+        "/photo_ai - understand a photo when used with photo module\n"
+        "/ask_photo question - ask about a photo\n"
+        "/caption_photo style - caption a photo\n"
+        "/photo_feedback - composition/profile feedback\n\n"
         "Offline commands, no API key needed:\n"
         "/keywords text - extract keywords\n"
         "/sentiment text - simple sentiment detection\n\n"
