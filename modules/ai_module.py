@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 try:
@@ -814,6 +814,7 @@ def ai_help_text() -> str:
         f"Provider: {provider}\n"
         f"Model: {model}\n\n"
         "Commands using AI API:\n"
+        "/smart plain-language request - suggest the best AhBashin command\n"
         "/askai your question - AI assistant with your active topic memory\n"
         "/chat math your question - continue a specific topic memory\n"
         "/newchat - clear active topic memory\n"
@@ -849,10 +850,29 @@ def ai_help_text() -> str:
     )
 
 
+def ai_tools_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🧠 Smart assistant", callback_data="menu:smart"),
+                InlineKeyboardButton("📚 Advanced list", callback_data="menu:modulehelp"),
+            ],
+            [
+                InlineKeyboardButton("🧮 Math tutor", callback_data="menu:math"),
+                InlineKeyboardButton("📊 Data tutor", callback_data="menu:data_science"),
+            ],
+            [
+                InlineKeyboardButton("📸 Photo AI", callback_data="menu:photo"),
+                InlineKeyboardButton("🏠 Main menu", callback_data="menu:main"),
+            ],
+        ]
+    )
+
+
 async def aihelp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
-    await update.message.reply_text(ai_help_text())
+    await update.message.reply_text(ai_help_text(), reply_markup=ai_tools_keyboard())
 
 
 # ------------------------------------------------------------
@@ -1058,6 +1078,131 @@ async def sentiment_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 
+
+# ------------------------------------------------------------
+# Smart natural-language command assistant
+# ------------------------------------------------------------
+
+SMART_COMMAND_CATALOG = """
+AhBashin command families:
+- General AI: /askai, /chat, /summarize, /rewrite, /explain, /translate_ai, /quiz, /flashcards, /code_explain, /code_fix, /regex, /sql
+- Math: /calc, /plot, /polyplot, /polyroots, /stats, /primes, /collatz, /fib, /derivative, /tangent, /integral, /areaplot, /newton, /polarplot, /paramplot, /math_tutor
+- Data science: /data_summary, /histogram, /boxplot, /correlation, /linear_regression, /poly_regression, /multiple_regression, /logistic_regression, /pca, /kmeans, /kmeans_auto, /moving_average, /forecast, /ttest, /chisquare, /dataset_profile, /corr_matrix, /pairplot, /csv_analyze, /ds_tutor
+- Physics: /kinematics, /projectile, /projectileplot, /force, /weight, /friction, /kinetic, /potential, /momentum, /wave, /ohm, /series, /parallel, /spring, /lens, /gravity, /convert, /physics_tutor
+- Chemistry: /element, /molar_mass, /balance, /idealgas, /molarity, /dilution, /ph, /gasplot, /chem_tutor
+- Astronomy: /moon, /moonplot, /planet, /solar_system, /astro_distance, /gravity_compare, /meteor, /astro_tutor
+- Graph theory: /convexhull, /graphdraw, /dijkstra, /shortestpath, /mst, /bfs, /dfs, /components, /toposort, /bipartite, /cycle
+- Photo AI: /photo_ai, /ask_photo, /caption_photo, /photo_feedback, /smart_photo, /photo_suggest, /enhance, /cinematic, /profile, /portrait, /cartoon, /sticker
+- Birthday/game/downloader/news: /add_birthday, /birthdays, /next_birthday, /dart, /dart_battle, /dart_top, /download, /audio, /wc_today, /wc_group, /trump, /activity_week
+""".strip()
+
+SMART_SYSTEM_PROMPT = f"""
+You are AhBashin's natural-language command assistant for a Telegram bot.
+Your job is to convert the user's plain-English request into the best AhBashin command or a short next step.
+
+Rules:
+1. Do NOT claim you executed the command.
+2. Suggest 1 best command first.
+3. If the exact input is missing, ask for the missing data in one short question.
+4. Prefer deterministic commands for calculations instead of freeform AI answers.
+5. If the user wants a conceptual explanation or tutoring, suggest the relevant tutor command.
+6. For multilingual tutor requests, preserve the language code when obvious: fa, de, it, fr, es, ar, en.
+7. Keep the reply short, practical, and easy to copy.
+8. Format:
+   Best command:
+   /command ...
+
+   Why:
+   short reason
+
+   Tip:
+   optional next step
+
+Available commands:
+{SMART_COMMAND_CATALOG}
+""".strip()
+
+
+def offline_smart_suggestion(text: str) -> str:
+    """Rule-based fallback when no AI provider is configured."""
+    q = (text or "").lower()
+
+    if any(w in q for w in ["molar", "molecule mass", "molecular mass"]):
+        return "Best command:\n/molar_mass FORMULA\n\nExample:\n/molar_mass C6H12O6"
+    if "balance" in q and any(w in q for w in ["chemical", "equation", "combustion", "reaction", "propane"]):
+        return "Best command:\n/balance C3H8 + O2 -> CO2 + H2O\n\nTip: replace the equation with your reaction."
+    if "ph" in q or "acid" in q:
+        return "Best command:\n/ph H=1e-7\n\nTip: you can also use /ph OH=1e-3 or /ph pOH=5."
+    if "projectile" in q:
+        return "Best command:\n/projectile speed=20 angle=45 tutor en\n\nTip: change speed and angle."
+    if "ohm" in q or "voltage" in q or "resistance" in q:
+        return "Best command:\n/ohm V=12 R=4 tutor en"
+    if "moon" in q:
+        return "Best command:\n/moon tutor en\n\nFor an image, use /moonplot."
+    if "planet" in q or "mars" in q or "jupiter" in q:
+        return "Best command:\n/planet mars tutor en"
+    if "forecast" in q:
+        return "Best command:\n/forecast steps 5 | 10,12,13,15,18,21 tutor en"
+    if "regression" in q and "poly" in q:
+        return "Best command:\n/poly_regression degree 2 | 1,2; 2,5; 3,10; 4,17 tutor en"
+    if "regression" in q:
+        return "Best command:\n/linear_regression 1,2; 2,4; 3,5; 4,8 tutor en"
+    if "csv" in q or "dataset" in q:
+        return "Best command:\nReply to your CSV file with:\n/dataset_profile ai\n\nFor correlations, use /corr_matrix."
+    if "dijkstra" in q or "shortest path" in q:
+        return "Best command:\n/dijkstra A D | A B 4; A C 2; C B 1; B D 5"
+    if "plot" in q or "graph" in q:
+        return "Best command:\n/plot sin(x) range -6.28 6.28\n\nTip: replace sin(x) with your function."
+    if "photo" in q or "image" in q or "picture" in q:
+        return "Best command:\n/ask_photo what should I improve in this image?\n\nOr use /smart_photo make this professional for LinkedIn."
+    if "birthday" in q:
+        return "Best command:\n/add_birthday Ali 1990-05-12\n\nThen use /birthdays or /next_birthday."
+    if "download" in q and ("x.com" in q or "twitter" in q):
+        return "Best command:\n/download https://x.com/...\n\nFor audio only, use /audio https://x.com/..."
+
+    return (
+        "Best command:\n/askai " + text.strip()[:500] +
+        "\n\nWhy:\nI could not map this clearly to a deterministic module command. Use /modulehelp to browse all commands."
+    )
+
+
+async def smart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    text = get_message_text(update, context)
+    if not text:
+        await update.message.reply_text(
+            "Smart assistant 🧠\n\n"
+            "Tell me what you want in normal language, and I will suggest the best AhBashin command.\n\n"
+            "Examples:\n"
+            "/smart plot sin x from -10 to 10\n"
+            "/smart balance propane combustion\n"
+            "/smart forecast the next 5 values from 10 12 13 15 18\n"
+            "/smart make this photo professional\n"
+        )
+        return
+
+    if get_ai_provider() == "offline":
+        await update.message.reply_text(offline_smart_suggestion(text))
+        return
+
+    try:
+        await update.message.chat.send_action(action="typing")
+        answer = await call_ai_with_history(
+            update=update,
+            system_prompt=SMART_SYSTEM_PROMPT,
+            user_prompt=text,
+            topic="general",
+            temperature=0.15,
+            max_tokens=900,
+        )
+    except Exception:
+        # If the AI provider fails, still give a useful deterministic suggestion.
+        answer = offline_smart_suggestion(text)
+
+    await send_ai_response(update, answer, filename="smart_suggestion.txt")
+
 # ------------------------------------------------------------
 # Persistent chat commands
 # ------------------------------------------------------------
@@ -1137,6 +1282,7 @@ async def chat_history_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def register_ai_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("aihelp", aihelp_command))
+    app.add_handler(CommandHandler("smart", smart_command))
     app.add_handler(CommandHandler("askai", askai_command))
     app.add_handler(CommandHandler("ai", askai_command))
     app.add_handler(CommandHandler("chat", chat_command))
